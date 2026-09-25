@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sisdefman"
+version = "0.1.0"
+description = "Manage Steam Inventory Service item definitions: series numbering, safe renumbering and single-file export."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+sisdefman = "sisdefman.cli:main"
+
+[tool.setuptools]
+packages = ["sisdefman"]

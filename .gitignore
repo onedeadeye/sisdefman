@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Keep real item definitions out of this repository.
+/sisdefman.json
+/itemdefs.json
+*.tmp
