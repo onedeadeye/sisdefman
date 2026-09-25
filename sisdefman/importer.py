@@ -328,13 +328,14 @@ def _absorb_series_dummies(project: Project, report: Report, keys: Optional[List
 def _strip_series_affixes(project: Project, imported: set, report: Report) -> None:
     """Remove series/index text a previous export added to descriptions."""
     stripped = 0
+    positions = project.series_positions()
     for key in project.series:
         members = project.members(key)
         for index, m in enumerate(members, 1):
             if m["itemdefid"] not in imported:
                 continue
             desc = m.get("description") or ""
-            before, after = project.template_affixes(key, m, index, len(members))
+            before, after = project.template_affixes(key, m, positions[m["itemdefid"]])
             if not (before or after):
                 continue
             if desc == (before + after).strip():

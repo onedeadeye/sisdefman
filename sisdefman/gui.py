@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, List, Tuple
 from urllib.parse import urlparse
 
-from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, safety, steam, ui
+from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, safety, steam, tableimport, ui
 from .project import DEFAULT_DUMMY_ITEM, MODES, Project, ProjectError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -113,7 +113,9 @@ class App:
         for key, s in project.series.items():
             members = [m["itemdefid"] for m in project.members(key)]
             series[key] = dict(copy.deepcopy(s), display_name=project.series_name(key), members=members,
-                               next_id=(members[-1] + 1) if members else s["first_id"])
+                               next_id=(members[-1] + 1) if members else s["first_id"],
+                               secret_ids=project.secret_ids(key),
+                               secret_rules=[";".join(r) for r in project.secret_rules(key)])
         live_info = project.live
         return {
             "version": __version__,
@@ -168,7 +170,7 @@ class App:
                 while slot in skip:
                     slot += 1
                 record["itemdefid"] = slot
-            info = derive.SeriesInfo(key, project.series_name(key), position, len(ids) + 1)
+            info = project.series_info(key, position, len(ids) + 1)
         else:
             info = project.series_positions().get(record["itemdefid"])
         schema = project.schema()
@@ -180,7 +182,7 @@ class App:
         by_rule = derive.resolve(schema, bare, info)[0] if kind else {}
         if info is not None:
             try:
-                item["description"] = project.render_description(info.key, item, info.index, info.count, record)
+                item["description"] = project.render_description(info.key, item, info, record)
             except ProjectError as e:
                 problems.append(str(e))
         return {"item": item, "problems": problems, "rules": {f: by_rule.get(f) for f in rules},
@@ -217,6 +219,23 @@ class App:
                                confirm)
         if route == "table/save":
             return self.mutate("This table change", lambda p: _save_table(p, body), confirm)
+        if route == "table/csv-preview":
+            data = tableimport.read_csv(str(body.get("csv") or ""))
+            clean = (lambda v: v.strip()) if body.get("raw") else tableimport.clean_value
+            return {"header": data.header, "columns": [tableimport.column_name(h) for h in data.header],
+                    "rows": len(data.rows), "samples": [[clean(v) for v in r] for r in data.rows[:3]]}
+        if route == "table/import":
+            def run(p: Project):
+                report = tableimport.import_csv(
+                    p, str(body.get("name") or ""), tableimport.read_csv(str(body.get("csv") or "")),
+                    key_column=body.get("key_column") or None, only=body.get("only"),
+                    skip=body.get("skip") or [], rename=body.get("rename") or {},
+                    fills=[tuple(f) for f in body.get("fills") or []], key_case=body.get("key_case") or "auto",
+                    raw=bool(body.get("raw")))
+                return dict(report.as_dict(), lines=report.lines(verbose=True))
+            if body.get("dry_run"):
+                return run(self.load())
+            return self.mutate("Importing into a table", run, confirm)
         if route == "table/delete":
             return self.mutate("Deleting this table", lambda p: edits.delete_table(p, body["name"]), confirm)
         if route == "kind/save":

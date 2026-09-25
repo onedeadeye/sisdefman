@@ -137,6 +137,9 @@ def check_project(project: Project) -> List[Issue]:
             if any(not r for r in rules):
                 add("warning", f"series {key!r}: container {cid} has an empty exclude rule")
 
+        if "secret" in s and members and not project.secret_ids(key):
+            add("warning", f"series {key!r}: no item matches its secret rares rule {s['secret']!r}")
+
         for gid_text, rule in s["generators"].items():
             gid = int(gid_text)
             try:

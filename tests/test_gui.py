@@ -146,6 +146,21 @@ class GuiServerTests(unittest.TestCase):
         status, data = self.post("settings/save", {"description_template": "{nope}"})
         self.assertEqual(status, 400)
 
+    def test_table_csv_import(self):
+        status, data = self.post("table/csv-preview", {"csv": fixtures.WEAPON_CSV})
+        self.assertEqual(data["result"]["rows"], 3)
+        self.assertEqual(data["result"]["samples"][0][1], "Pistol")
+        self.assertEqual(data["result"]["columns"][0], "column")
+        body = {"name": "weapon_data", "csv": fixtures.WEAPON_CSV, "only": ["DisplayName", "Range"],
+                "rename": {"DisplayName": "label"}, "key_case": "lower"}
+        status, data = self.post("table/import", dict(body, dry_run=True))
+        self.assertEqual(data["result"]["added"], ["pistol", "rifle", "knife"])
+        self.assertNotIn("weapon_data", self.project().tables)
+        status, data = self.post("table/import", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.project().tables["weapon_data"]["rows"]["rifle"], {"label": "Long Rifle", "Range": "LONG"})
+        self.assertEqual(self.post("table/csv-preview", {"csv": ""})[0], 400)
+
     def test_items_remove_move_set_export_import(self):
         status, data = self.post("item/move", {"id": 117, "position": 1})
         self.assertEqual(data["result"]["moved"]["117"], 110)

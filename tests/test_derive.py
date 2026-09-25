@@ -164,3 +164,44 @@ class AdoptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeriesCountTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project, _ = importer.import_files(fixtures.write_files(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def built(self):
+        return {it["itemdefid"]: it for it in self.project.build()}
+
+    def test_counts_default_to_the_container_exclusions(self):
+        # The fixture crate leaves rarity:epic out of its list: 6 regular + 2 secret.
+        self.assertEqual(self.project.secret_ids("crate1"), [116, 117])
+        info = self.project.series_positions()[110]
+        self.assertEqual((info.count, info.count_no_secret, info.count_secret), (8, 6, 2))
+        self.project.settings["description_template"] = \
+            "{description}\n\n#{index} of {count_no_secret} (+{count_secret}; {series.count} in all)"
+        self.assertTrue(self.built()[110]["description"].endswith("#1 of 6 (+2; 8 in all)"))
+
+    def test_explicit_secret_rule_and_kind_templates(self):
+        self.project.series["crate1"]["secret"] = ["rarity:rare", "rarity:epic"]
+        self.assertEqual(self.project.secret_ids("crate1"), [115, 116, 117])
+        self.project.data.update(fixtures.skin_schema())
+        adopt.adopt(self.project, "skin", list(range(110, 118)))
+        self.project.kinds["skin"]["derive"]["display_type"] = "{series.count_no_secret}/{series.count_secret}"
+        self.assertEqual(self.built()[110]["display_type"], "5/3")
+        self.project.series["crate1"]["secret"] = []
+        self.assertEqual(self.built()[110]["display_type"], "8/0")
+
+    def test_container_tokens(self):
+        crate = self.project.item(1)
+        crate["description"] = crate["description"].replace(
+            "Contains an item from the Test Series.",
+            "One of {count_no_secret} items from the {series_name}, or one of {count_secret} secret ones.")
+        text = self.built()[1]["description"]
+        self.assertTrue(text.startswith("One of 6 items from the Test Series, or one of 2 secret ones.\n\nPistol | Red"))
+        ops.insert_items(self.project, "crate1", [{"name": "New", "tags": "rarity:epic"}])
+        self.assertTrue(self.built()[1]["description"].startswith("One of 6 items from the Test Series, or one of 3"))

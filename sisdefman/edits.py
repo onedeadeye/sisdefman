@@ -238,7 +238,9 @@ def import_schema(project: Project, data: dict) -> List[str]:
 def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[str]:
     """Create or change a series' settings. ``config`` holds any of name,
     first_id (new series only), last_id, description_template (None or "" to
-    use the global one), containers and generators. Returns notes."""
+    use the global one), secret (tag rule(s) marking secret rares; None or ""
+    to use the containers' exclude tags), containers and generators. Returns
+    notes."""
     notes: List[str] = []
     if is_new:
         if key in project.series:
@@ -266,6 +268,16 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
             s.pop("description_template", None)
         else:
             s["description_template"] = template
+    if "secret" in config:
+        secret = config["secret"]
+        if secret in (None, "") or secret == []:
+            s.pop("secret", None)
+        else:
+            rules = secret if isinstance(secret, list) else [secret]
+            for rule in rules:
+                if not isinstance(rule, str) or not steam.parse_tag_rule(rule):
+                    raise ProjectError(f"secret rares need a tag rule such as rarity:epic (got {rule!r})")
+            s["secret"] = secret
     if "containers" in config:
         s["containers"] = {str(int(k)): {"exclude": [t for t in (v or {}).get("exclude", []) if t]}
                            for k, v in (config["containers"] or {}).items()}

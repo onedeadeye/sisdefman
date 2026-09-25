@@ -256,3 +256,10 @@ table.edit select { min-width: 110px; }
 }
 .editor { width: 520px; }
 .kv { grid-template-columns: minmax(90px, 26%) 74px minmax(0, 1fr) auto; }
+.hscroll { overflow-x: auto; }
+table.edit.wide input { min-width: 120px; }
+.ref-info { font-size: 12px; color: var(--muted); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.ref-info b { font-weight: 600; }
+.ref-info details { width: 100%; }
+.ref-info summary { cursor: pointer; }
+.ref-info summary > span { margin-right: 12px; }

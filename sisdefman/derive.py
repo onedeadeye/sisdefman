@@ -16,8 +16,9 @@ is that row's ``name`` column (``Pistol``).
 Templates use Python's format syntax: ``{field}``, ``{series.index:03d}``,
 ``{{`` for a literal brace. Besides the kind's fields they can use
 ``{itemdefid}``, ``{series}`` (key), ``{series.name}``, ``{series.index}``,
-``{series.count}``, any other derived field of the kind and any other value
-stored on the item.
+``{series.count}`` (items in the series), ``{series.count_no_secret}`` and
+``{series.count_secret}`` (without / only the secret rares), any other
+derived field of the kind and any other value stored on the item.
 
 A value stored on an item for a derived field overrides the rule.
 """
@@ -32,7 +33,9 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from . import steam
 
 FIELD_TYPES = ("text", "multiline", "number", "bool", "ref")
-RESERVED_NAMES = ("itemdefid", "kind", "series", "series_name", "index", "count")
+RESERVED_NAMES = ("itemdefid", "kind", "series", "series_name", "index", "count", "count_no_secret",
+                  "count_secret")
+SERIES_NAMES = ("series_name", "index", "count", "count_no_secret", "count_secret")
 
 _FORMATTER = string.Formatter()
 _MISSING = object()
@@ -43,7 +46,9 @@ class SeriesInfo(NamedTuple):
     key: str
     name: str
     index: int
-    count: int
+    count: int  # every item of the series
+    count_no_secret: Optional[int] = None  # without the secret rares (None: same as count)
+    count_secret: int = 0
 
 
 class Unknown(Exception):
@@ -76,15 +81,21 @@ class RefValue:
 
 
 class SeriesValue:
-    """``{series}`` is the key; ``.name``, ``.index`` and ``.count`` are attributes."""
+    """``{series}`` is the key; ``.name``, ``.index``, ``.count``,
+    ``.count_no_secret`` and ``.count_secret`` are attributes."""
 
-    __slots__ = ("key", "name", "index", "count")
+    __slots__ = ("key", "name", "index", "count", "count_no_secret", "count_secret")
 
     def __init__(self, info: Optional[SeriesInfo]):
         self.key = info.key if info else ""
         self.name = info.name if info else ""
         self.index = info.index if info else ""
         self.count = info.count if info else ""
+        if info is None:
+            self.count_no_secret = self.count_secret = ""
+        else:
+            self.count_no_secret = info.count if info.count_no_secret is None else info.count_no_secret
+            self.count_secret = info.count_secret
 
     def __str__(self) -> str:
         return self.key
@@ -193,9 +204,9 @@ class Context:
             return self.values.get("itemdefid", "")
         if name == "series":
             return SeriesValue(self.series)
-        if name in ("series_name", "index", "count"):
+        if name in SERIES_NAMES:
             s = SeriesValue(self.series)
-            return {"series_name": s.name, "index": s.index, "count": s.count}[name]
+            return s.name if name == "series_name" else getattr(s, name)
         fields = fields_of(self.kind)
         rules = rules_of(self.kind)
         stored = self.values.get(name, _MISSING)

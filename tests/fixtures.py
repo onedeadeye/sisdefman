@@ -145,3 +145,18 @@ def skin_schema():
             }
         },
     }
+
+
+# An Unreal Engine DataTable export (CSV) with weapon reference data.
+WEAPON_CSV = (
+    '---,DisplayName,Description,ActorClass,Category,Range\n'
+    'Pistol,"NSLOCTEXT(""[NS]"", ""K1"", ""Pistol"")","NSLOCTEXT(""[NS]"", ""K2"", ""A small \\""gun\\""."")",'
+    '"/Game/Weapons/Pistol/BP_Pistol_Actor.BP_Pistol_Actor_C",'
+    '"(DataTable=""/Script/Engine.DataTable\'/Game/Data/DT_Categories.DT_Categories\'"",RowName=""Basic"")",SHORT\n'
+    'Rifle,"NSLOCTEXT(""[NS]"", ""K3"", ""Long Rifle"")","NSLOCTEXT(""[NS]"", ""K4"", ""Reaches far."")",'
+    '"/Game/Weapons/Rifle/BP_Rifle_Actor.BP_Rifle_Actor_C",'
+    '"(DataTable=""/Script/Engine.DataTable\'/Game/Data/DT_Categories.DT_Categories\'"",RowName=""Bullet"")",LONG\n'
+    'Knife,"NSLOCTEXT(""[NS]"", ""K5"", ""Knife"")",,'
+    '"/Game/Weapons/Knife/BP_Knife_Actor.BP_Knife_Actor_C",'
+    '"(DataTable=""/Script/Engine.DataTable\'/Game/Data/DT_Categories.DT_Categories\'"",RowName=""Basic"")",SHORT\n'
+)

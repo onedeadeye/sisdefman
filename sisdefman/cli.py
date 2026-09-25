@@ -9,7 +9,7 @@ import os
 import sys
 from typing import List, Optional
 
-from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, query, safety, steam, ui
+from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, query, safety, steam, tableimport, ui
 from .project import MODES, Project, ProjectError
 
 DEFAULT_PROJECT = "sisdefman.json"
@@ -151,8 +151,10 @@ def cmd_list(args) -> int:
         s = project.series[key]
         members = project.members(key)
         next_id = (members[-1]["itemdefid"] + 1) if members else s["first_id"]
+        secret = len(project.secret_ids(key))
+        counts = f"{len(members)} items" + (f" ({len(members) - secret} + {secret} secret)" if secret else "")
         print(ui.bold(f"{key} - {project.series_name(key)}") +
-              f"  (IDs {s['first_id']}-{s['last_id']}, {len(members)} items, next free ID {next_id})")
+              f"  (IDs {s['first_id']}-{s['last_id']}, {counts}, next free ID {next_id})")
         if not args.series:
             continue
         exported = {it["itemdefid"]: it for it in built}
@@ -339,6 +341,10 @@ def cmd_series(args) -> int:
                 print(f"    container {cid}: lists items, excluding {exclude}")
             for gid, rule in s["generators"].items():
                 print(f"    generator {gid}: every item tagged {rule}")
+            secret = project.secret_ids(key)
+            rules = " or ".join(";".join(r) for r in project.secret_rules(key)) or "none"
+            source = "" if "secret" in s else " (from the containers)"
+            print(f"    secret rares: items tagged {rules}{source}: {len(secret)} of {len(members)}")
         return 0
 
     config = {"name": getattr(args, "name", None)}
@@ -349,6 +355,8 @@ def cmd_series(args) -> int:
     s = project.series.get(args.key, {"containers": {}, "generators": {}})
     if args.template is not None:
         config["description_template"] = _unescape(args.template)
+    if args.secret is not None:
+        config["secret"] = args.secret
     if args.exclude and not args.container:
         raise ProjectError("--exclude applies to the containers given with --container")
     if args.container or args.remove:
@@ -382,7 +390,8 @@ def cmd_template(args) -> int:
         members = project.members(key)
         if members:
             print(ui.dim(f"Example ({key} #1, itemdefid {members[0]['itemdefid']}):"))
-            print(project.render_description(key, members[0], 1, len(members)))
+            print(project.render_description(key, project.resolve(members[0])[0],
+                                             project.series_positions()[members[0]["itemdefid"]], members[0]))
             break
     return 0
 
@@ -633,7 +642,7 @@ def cmd_table(args) -> int:
     if action == "show":
         table = edits._table(project, args.name)
         used = edits.rows_in_use(project, args.name)
-        columns = table["columns"]
+        columns = [c.strip() for c in args.columns.split(",")] if args.columns else table["columns"]
         rows = [["key"] + columns + ["items"]]
         for key, row in table["rows"].items():
             rows.append([key] + [_cell(row.get(c, "")) for c in columns] + [str(len(used.get(key, [])))])
@@ -657,6 +666,26 @@ def cmd_table(args) -> int:
     elif action == "rename":
         n = edits.rename_row(project, args.name, args.old, args.new)
         print(f"Renamed {args.old!r} to {args.new!r}; updated {n} item(s).")
+    elif action == "import":
+        with open(args.file, encoding="utf-8-sig", newline="") as f:
+            data = tableimport.read_csv(f.read())
+        split = lambda text: [c.strip() for c in text.split(",") if c.strip()] if text else None  # noqa: E731
+        rename, fills = {}, []
+        for spec in args.map or []:
+            source, sep, target = spec.partition("=")
+            if not sep:
+                raise ProjectError(f"--map expects CSVCOLUMN=COLUMN, got {spec!r}")
+            rename[source] = target
+        for spec in args.fill or []:
+            target, sep, source = spec.partition("=")
+            if not sep:
+                raise ProjectError(f"--fill expects COLUMN=CSVCOLUMN, got {spec!r}")
+            fills.append((target, source))
+        report = tableimport.import_csv(project, args.name, data, key_column=args.key, only=split(args.only),
+                                        skip=split(args.skip) or [], rename=rename, fills=fills,
+                                        key_case=args.key_case, raw=args.raw)
+        for line in report.lines(args.verbose):
+            print(ui.yellow(line) if "differ from the file" in line else line)
     return _guarded_save(args, project, protect, "This table change")
 
 
@@ -763,6 +792,9 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             sp.add_argument("--last-id", type=int, help="last itemdefid the series may use")
         sp.add_argument("--template", help="description template for this series (\"\" = use the global one)")
+        sp.add_argument("--secret", metavar="TAGS",
+                        help="tags that mark the series' secret rares, e.g. rarity:epic "
+                             "(\"\" = the tags its containers leave out)")
         sp.add_argument("--container", type=int, action="append", metavar="ID",
                         help="definition whose description lists the series' items at {contents}")
         sp.add_argument("--exclude", action="append", metavar="TAG",
@@ -837,6 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     tsub.add_parser("list", help="list tables", parents=[common]).set_defaults(func=cmd_table)
     sp = tsub.add_parser("show", help="show a table's rows", parents=[common])
     sp.add_argument("name")
+    sp.add_argument("-c", "--columns", help="comma-separated columns to show (default: all)")
     sp.set_defaults(func=cmd_table)
     sp = tsub.add_parser("new", help="create a table", parents=[common])
     sp.add_argument("name")
@@ -853,6 +886,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name")
     sp.add_argument("key")
     sp.add_argument("--force", action="store_true", help="even if items use it")
+    guarded(sp)
+    sp.set_defaults(func=cmd_table)
+    sp = tsub.add_parser("import", parents=[common],
+                         help="add a CSV file (e.g. an Unreal DataTable export) to a table, for reference",
+                         description="Add the rows of a CSV file to a table. Unreal Engine notation (NSLOCTEXT, "
+                                     "row handles, asset paths) is cleaned up and keys match existing rows "
+                                     "ignoring case. Each CSV column becomes a table column of the same name.")
+    sp.add_argument("name", help="table to add to (created if needed)")
+    sp.add_argument("file", help="CSV file; the first row names the columns")
+    sp.add_argument("--key", metavar="COLUMN", help="column holding the row keys (default: the first)")
+    sp.add_argument("--only", metavar="COLS", help="comma-separated CSV columns to import")
+    sp.add_argument("--skip", metavar="COLS", help="comma-separated CSV columns to leave out")
+    sp.add_argument("--map", action="append", metavar="CSVCOL=COLUMN", help="store a CSV column under another name")
+    sp.add_argument("--fill", action="append", metavar="COLUMN=CSVCOL",
+                    help="also copy a CSV column into COLUMN where it is empty, and report where they differ")
+    sp.add_argument("--key-case", choices=tableimport.KEY_CASES, default="auto",
+                    help="case of new keys: auto (lower case if the table's keys are), lower or keep")
+    sp.add_argument("--raw", action="store_true", help="keep values exactly as in the file")
+    sp.add_argument("-v", "--verbose", action="store_true", help="list every replaced value")
     guarded(sp)
     sp.set_defaults(func=cmd_table)
     sp = tsub.add_parser("rename", help="rename a row key and every reference to it", parents=[common])

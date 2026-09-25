@@ -57,6 +57,7 @@ own machine. Keep the terminal open while you use it.
 - **Series actions.** Add an item at the end or at a chosen position, duplicate, move or
   remove items.
 - **Item kinds and Lookup tables.** Edit the rules and tables. Previews update as you type.
+  **Import CSV…** brings in reference data such as an Unreal DataTable export (below).
 - **Series setup.** Set each series' ID range, display name, description template, crates
   and generators.
 - **Settings & export.**
@@ -141,6 +142,7 @@ every skin of that weapon follows.
   | `{field}` | a field's value |
   | `{weapon.name}` | a column of the table row that a `ref` field points to |
   | `{series}`, `{series.name}`, `{series.index}`, `{series.count}` | the item's series key, display name, position and size |
+  | `{series.count_no_secret}`, `{series.count_secret}` | the series' size without secret rares, and its number of secret rares (see [Secret rares](#secret-rares-and-item-counts)) |
   | `{itemdefid}` | the item's ID |
   | `{name}` | another derived field (here, the name) |
   | `{series.index:03d}` | a number padded to three digits |
@@ -194,6 +196,44 @@ a value that is ambiguous in one item is settled by another.
 
 `sisdefman detach IDS` turns items back into plain definitions.
 
+## Reference data from CSV files
+
+Game data exported to CSV can be added to a lookup table for reference. For example, an
+Unreal Engine DataTable of weapons:
+
+```sh
+sisdefman table import weapon weapons.csv --skip ActorClass \
+    --fill name=DisplayName --fill class=Category
+```
+
+- **Keys.** The first column (Unreal's `---`) holds the row keys. They match existing rows
+  ignoring case, so `Pistol` in the file updates the row `pistol`. New keys follow
+  the table's case.
+- **Unreal notation is cleaned up:**
+  - `NSLOCTEXT("…", "…", "Handgun")` becomes `Handgun`;
+  - row handles `(DataTable=…,RowName="Basic")` become `Basic`;
+  - asset and class paths become their object name (`BP_Pistol_Pickup_C`).
+
+  `--raw` keeps values as they are.
+- **Nothing your items use changes by default.** Each CSV column is stored as a table column
+  of the same name (`DisplayName`, `Description`, `Range`...).
+  - `--map CSVCOL=COLUMN` stores a column under another name. Mapping onto a column that
+    templates use changes the items, and release mode asks first.
+  - `--fill COLUMN=CSVCOL` copies a CSV column into a table column only where that column
+    is empty. It lists every row where the two disagree, for example a weapon whose Steam
+    name differs from its in-game name.
+- **Other options:** `--only`/`--skip` choose columns, `--key` picks the key column, and
+  `-n` previews without saving.
+
+The imported columns can then be used like any other:
+
+- in templates (`{weapon.Description}`);
+- in queries (`sisdefman query -w weapon.Range=LONG -f id,name,weapon.DisplayName`);
+- in the GUI, which shows a weapon's row under the weapon field.
+
+In the GUI, use **Lookup tables → Import CSV…**. Columns that look like class references
+start unticked there.
+
 ## Database-style commands
 
 ```sh
@@ -205,7 +245,7 @@ sisdefman set 110-114 "flavor=Painted by hand."    # a range of IDs
 sisdefman set --where tags.rarity=epic marketable:=false
 sisdefman set 110 --unset name_color
 
-sisdefman table show weapon
+sisdefman table show weapon -c name,class,Range
 sisdefman table set weapon pistol name=Handgun class=Basic
 sisdefman table rename weapon pistol handgun        # updates every item that uses it
 sisdefman schema                                    # summary of tables and kinds
@@ -220,6 +260,7 @@ sisdefman schema export -o schema.json
 - **What conditions can test:**
   - the exported fields;
   - a kind's fields;
+  - a column of the table row that a `ref` field points to (`weapon.Range`);
   - one tag (`tags.rarity`);
   - `id`, `kind`, `series`, `index` and `dummy`.
 - **Values:** `FIELD=TEXT` stores text; `FIELD:=JSON` stores `true`, `5`, etc.
@@ -250,7 +291,7 @@ If a crate's list is out of date, the import prints the difference.
 | --- | --- | --- |
 | Items of a kind | the kind's fields and any overrides | the kind's rules applied |
 | Descriptions of series items | the plain description (or the kind's rule) | the series line added (below) |
-| Descriptions of containers (crates) | text containing `{contents}` | `{contents}` replaced by the names of the series' items, one per line, leaving out items with an `exclude` tag |
+| Descriptions of containers (crates) | text containing `{contents}` | `{contents}` replaced by the names of the series' items, one per line, leaving out items with an `exclude` tag; `{count}`, `{count_no_secret}`, `{count_secret}` and `{series_name}` filled in |
 | Bundles of the generators listed in a series' `generators` | a tag rule, e.g. `rarity:common` | every series item with that tag, in series order |
 | Unused IDs from `first_id` to `allocated_through` | nothing | dummy items built from `settings.dummy_item` |
 
@@ -268,6 +309,7 @@ the template can use:
 | `{description}` | the item's description (derived or stored) |
 | `{series_name}` / `{series}` | display name / key of the series |
 | `{index}` / `{count}` | position in the series / number of items in it (`{index:03d}` pads to 3 digits) |
+| `{count_no_secret}` / `{count_secret}` | number of items without the secret rares / number of secret rares |
 | `{name}` / `{itemdefid}` | the item's name / ID |
 | `{tags[rarity]}` | the value of one of the item's tags |
 
@@ -275,6 +317,32 @@ the template can use:
 sisdefman template '{description}\n\n{series_name} #{index}'   # \n is a line break
 sisdefman series set crate2 --template '{description}\n\n{series_name} - {index} of {count}'
 sisdefman series set crate2 --template ''                       # back to the global one
+```
+
+### Secret rares and item counts
+
+Each series knows which of its items are secret rares, so templates can count with or without
+them:
+
+| Property | Series line and crates | Kind templates |
+| --- | --- | --- |
+| every item, secret rares included | `{count}` | `{series.count}` |
+| items without the secret rares | `{count_no_secret}` | `{series.count_no_secret}` |
+| secret rares only | `{count_secret}` | `{series.count_secret}` |
+
+By default the secret rares are the items the series' crate leaves out of its list (its
+`exclude` tags, e.g. `rarity:epic`). To set them explicitly, use
+`sisdefman series set crate1 --secret rarity:epic`, or the Series setup page; `--secret ""`
+goes back to the default. `sisdefman list` shows the split, e.g. `25 items (15 + 10 secret)`.
+
+A crate's description can use the counts too:
+
+```text
+Contains one of {count_no_secret} appearances from the {series_name}.
+
+{contents}
+
+...or one of {count_secret} Secret Rare Special Appearances!
 ```
 
 ### Adding, inserting, moving and removing items
@@ -352,8 +420,8 @@ the next free one. Appending is always safe.
 | `add` / `move` / `remove` | change a series (see above) |
 | `adopt KIND IDS` / `detach IDS` | convert items to a kind and back |
 | `schema [export \| import FILE]` | show, export or import tables and kinds |
-| `table [show \| new \| set \| delete \| rename]` | edit lookup tables |
-| `series [new \| set]` | show or configure series (range, name, template, containers, generators) |
+| `table [show \| new \| set \| delete \| rename \| import]` | edit lookup tables; import CSV reference data |
+| `series [new \| set]` | show or configure series (range, name, template, secret rares, containers, generators) |
 | `template [TEXT]` | show or set the series line |
 | `mode [prerelease \| release]` / `mark-live` / `diff [--against FILE]` | release protection |
 
@@ -376,6 +444,7 @@ the next free one. Appending is always safe.
             "first_id": 110,
             "last_id": 196,               // the series may grow up to here
             "allocated_through": 143,     // highest ID it has used; unused ones export as dummies
+            "secret": "rarity:epic",      // optional: which items are secret rares
             "containers": { "1": { "exclude": ["rarity:epic"] } },
             "generators": { "101": "rarity:common", "102": "rarity:uncommon", "103": "rarity:rare", "104": "rarity:epic" }
         }

@@ -54,7 +54,11 @@ DEFAULT_DUMMY_ITEM = {
     "marketable": False,
 }
 
-TEMPLATE_FIELDS = ("description", "series", "series_name", "index", "count", "itemdefid", "name", "tags")
+TEMPLATE_FIELDS = ("description", "series", "series_name", "index", "count", "count_no_secret", "count_secret",
+                   "itemdefid", "name", "tags")
+
+# Tokens filled in in the descriptions of a series' containers.
+CONTAINER_TOKENS = ("{contents}", "{count}", "{count_no_secret}", "{count_secret}", "{series_name}")
 
 
 class ProjectError(Exception):
@@ -279,12 +283,48 @@ class Project:
     def series_name(self, key: str) -> str:
         return self.get_series(key).get("name") or key
 
+    def secret_rules(self, key: str) -> List[List[str]]:
+        """Tag rules marking a series' secret rares: the series' ``secret``
+        setting, or else the tags its containers leave out of their lists."""
+        s = self.get_series(key)
+        if "secret" in s:
+            rules = s["secret"] if isinstance(s["secret"], list) else [s["secret"]]
+        else:
+            rules = [r for cfg in s["containers"].values() for r in (cfg or {}).get("exclude", [])]
+        return [tags for tags in (steam.parse_tag_rule(r) for r in rules if r) if tags]
+
+    def secret_ids(self, key: str) -> List[int]:
+        """The secret rares of a series (items matching its secret rules)."""
+        rules = self.secret_rules(key)
+        if not rules:
+            return []
+        schema = self.schema()
+        members = self.members(key)
+        out = []
+        for index, m in enumerate(members, 1):
+            item = m
+            if schema.kind_of(m) is not None:  # tags may be derived
+                info = SeriesInfo(key, self.series_name(key), index, len(members))
+                item = derive.resolve(schema, m, info)[0]
+            if any(steam.has_tags(item, rule) for rule in rules):
+                out.append(m["itemdefid"])
+        return out
+
+    def series_info(self, key: str, index: int, count: Optional[int] = None,
+                    secret: Optional[int] = None) -> SeriesInfo:
+        """Position ``index`` in a series of ``count`` items (default: its
+        current size) of which ``secret`` are secret rares."""
+        count = len(self.members(key)) if count is None else count
+        secret = len(self.secret_ids(key)) if secret is None else secret
+        return SeriesInfo(key, self.series_name(key), index, count, count - secret, secret)
+
     def series_positions(self) -> Dict[int, SeriesInfo]:
         out = {}
         for key in self.series:
             members = self.members(key)
+            secret = len(self.secret_ids(key))
             for index, m in enumerate(members, 1):
-                out[m["itemdefid"]] = SeriesInfo(key, self.series_name(key), index, len(members))
+                out[m["itemdefid"]] = self.series_info(key, index, len(members), secret)
         return out
 
     def resolve_all(self) -> Tuple[Dict[int, dict], Dict[int, List[str]]]:
@@ -305,17 +345,16 @@ class Project:
         series text."""
         return derive.resolve(self.schema(), record, self.series_positions().get(record["itemdefid"]))
 
-    def render_description(self, key: str, item: dict, index: int, count: int,
-                           record: Optional[dict] = None) -> str:
+    def render_description(self, key: str, item: dict, info: SeriesInfo, record: Optional[dict] = None) -> str:
         """The series description template applied to ``item`` (a resolved
-        definition). ``record`` gives access to its kind's fields."""
+        definition) at position ``info``. ``record`` gives access to its
+        kind's fields."""
         template = self.description_template(key)
         base = item.get("description") or ""
         values = dict(record or {})
         values.update(item)
         for name in ("description", "name", "tags"):
             values.setdefault(name, "")
-        info = SeriesInfo(key, self.series_name(key), index, count)
         ctx = derive.Context(self.schema(), values, info)
         text = ctx.render_rule(template, "description template")
         for problem in ctx.problems:
@@ -326,10 +365,10 @@ class Project:
                 )
         return text.strip() if not base.strip() else text
 
-    def template_affixes(self, key: str, item: dict, index: int, count: int) -> Tuple[str, str]:
+    def template_affixes(self, key: str, item: dict, info: SeriesInfo) -> Tuple[str, str]:
         """The text the template adds before and after the base description."""
         sentinel = "\x00SISDEFMAN\x00"
-        text = self.render_description(key, dict(item, description=sentinel), index, count)
+        text = self.render_description(key, dict(item, description=sentinel), info)
         if sentinel not in text:
             return "", ""
         before, _, after = text.partition(sentinel)
@@ -387,20 +426,31 @@ class Project:
     def build_with_problems(self) -> Tuple[List[dict], Dict[int, List[str]]]:
         out, problems = self.resolve_all()
         records = self.by_id()
+        positions = self.series_positions()
         for key, s in self.series.items():
             members = self.members(key)
-            for index, m in enumerate(members, 1):
+            for m in members:
                 i = m["itemdefid"]
-                out[i]["description"] = self.render_description(key, out[i], index, len(members), records[i])
+                out[i]["description"] = self.render_description(key, out[i], positions[i], records[i])
             resolved_members = {m["itemdefid"]: out[m["itemdefid"]] for m in members}
             for gid, rule in self.generator_rules(key):
                 if gid in out:
                     out[gid]["bundle"] = self.generator_bundle(key, rule, out)
+            count = len(members)
+            secret = positions[members[0]["itemdefid"]].count_secret if members else 0
+            tokens = {"{contents}": None, "{count}": str(count), "{count_no_secret}": str(count - secret),
+                      "{count_secret}": str(secret), "{series_name}": self.series_name(key)}
             for cid in self.container_ids(key):
                 c = out.get(cid)
-                if c is not None and CONTENTS_TOKEN in (c.get("description") or ""):
-                    c["description"] = c["description"].replace(CONTENTS_TOKEN,
-                                                                self.container_listing(key, cid, out))
+                text = (c or {}).get("description")
+                if not isinstance(text, str) or not any(t in text for t in CONTAINER_TOKENS):
+                    continue
+                if "{contents}" in text:
+                    tokens["{contents}"] = self.container_listing(key, cid, out)
+                for token, value in tokens.items():
+                    if value is not None:
+                        text = text.replace(token, value)
+                c["description"] = text
             top = max([s.get("allocated_through") or 0] + list(resolved_members))
             for i in range(s["first_id"], top + 1):
                 if i not in out:

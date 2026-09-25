@@ -6,8 +6,9 @@ ignoring case), ``FIELD!~TEXT``, ``FIELD<N`` / ``>`` / ``<=`` / ``>=``, or a
 bare ``FIELD`` (is set) / ``!FIELD`` (is not set).
 
 Fields are those of the exported definition (``name``, ``type``, ``tags``...),
-the item's kind fields (``weapon``, ``flavor``...), one tag (``tags.rarity``)
-and ``id``, ``kind``, ``series``, ``index`` and ``dummy``.
+the item's kind fields (``weapon``, ``flavor``...), the columns of the table
+row a ref field points to (``weapon.Range``), one tag
+(``tags.rarity``) and ``id``, ``kind``, ``series``, ``index`` and ``dummy``.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
-from . import steam
+from . import derive, steam
 from .project import Project, ProjectError
 
 _CONDITION = re.compile(
@@ -83,6 +84,7 @@ def item_views(project: Project, include_dummies: bool = False) -> List[dict]:
     """One flat dictionary per definition, for filtering and display."""
     records = project.by_id()
     positions = project.series_positions()
+    schema = project.schema()
     out = []
     for it in project.build():
         i = it["itemdefid"]
@@ -101,6 +103,12 @@ def item_views(project: Project, include_dummies: bool = False) -> List[dict]:
             view.setdefault(k, v)
         for k, v in (rec or {}).items():
             view.setdefault(k, v)
+        for name, spec in derive.fields_of(schema.kind_of(rec or {})).items():
+            if spec.get("type") == "ref" and (rec or {}).get(name) not in (None, ""):
+                table = schema.tables.get(spec.get("table")) or {}
+                row = (table.get("rows") or {}).get(str(rec[name])) or {}
+                for column in table.get("columns") or []:
+                    view.setdefault(f"{name}.{column}", row.get(column, ""))
         for cat, val in steam.parse_tags(it.get("tags")):
             key = f"tags.{cat}"
             if key in view:

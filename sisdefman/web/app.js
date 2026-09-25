@@ -677,11 +677,24 @@ function renderKindFields(rec, kind) {
     } else if (spec.type === "ref") {
       const rows = (S.tables[spec.table] || { rows: {} }).rows;
       const keys = Object.keys(rows);
-      input = h("select", { onchange: (ev) => set(ev.target.value) },
+      const info = h("div", { class: "ref-info" });
+      const showRow = (key) => {
+        const t = S.tables[spec.table];
+        const row = t && t.rows[key];
+        const parts = row ? t.columns.slice(1).filter((c) => row[c] !== undefined && row[c] !== "")
+          .map((c) => h("span", {}, h("b", {}, c + ": "), String(row[c]))) : [];
+        if (parts.length <= 3) { info.replaceChildren(...parts); return; }
+        info.replaceChildren(h("details", {},
+          h("summary", {}, parts.slice(0, 2), h("span", { class: "hint" }, ` +${parts.length - 2} more`)),
+          h("div", { class: "ref-info" }, parts.slice(2))));
+      };
+      const sel = h("select", { onchange: (ev) => { set(ev.target.value); showRow(ev.target.value); } },
         h("option", { value: "" }, "—"),
         value && !keys.includes(String(value)) ? h("option", { value }, `${value} (not in table ${spec.table})`) : null,
         keys.map((k) => h("option", { value: k }, refLabel(spec.table, k))));
-      input.value = value ?? "";
+      sel.value = value ?? "";
+      showRow(value);
+      input = h("div", {}, sel, info);
     } else {
       input = h("input", { type: "text", value: value ?? "", oninput: (ev) => set(ev.target.value) });
     }
@@ -1025,7 +1038,8 @@ function renderKindsPage() {
           h("div", { class: "help", style: "margin-top:12px" },
             h("b", {}, "Templates. "), "Write ", h("code", {}, "{field}"), " to insert a field, ", h("code", {}, "{weapon.name}"),
             " for a column of the lookup-table row a ref field points to, ", h("code", {}, "{series}"), ", ",
-            h("code", {}, "{series.name}"), ", ", h("code", {}, "{series.index}"), ", ", h("code", {}, "{itemdefid}"),
+            h("code", {}, "{series.name}"), ", ", h("code", {}, "{series.index}"), ", ", h("code", {}, "{series.count}"),
+            " / ", h("code", {}, "{series.count_no_secret}"), " / ", h("code", {}, "{series.count_secret}"), ", ", h("code", {}, "{itemdefid}"),
             ", or another derived field such as ", h("code", {}, "{name}"), ". ", h("code", {}, "{series.index:03d}"),
             " pads a number; ", h("code", {}, "{{"), " is a literal brace. Example: ",
             h("code", {}, "https://example.com/{weapon}_{mat_id}_small.png"), ".")),
@@ -1077,7 +1091,8 @@ function renderTablesPage() {
   const list = h("div", { class: "list" },
     names.map((t) => h("button", { class: ui.tableSel === t ? "active" : "", onclick: () => { ui.tableSel = t; render(); } },
       h("span", {}, t), h("span", { class: "hint" }, Object.keys(S.tables[t].rows || {}).length))),
-    h("button", { class: ui.tableSel === "__new__" ? "active" : "", onclick: () => { ui.tableSel = "__new__"; render(); } }, "+ New table"));
+    h("button", { class: ui.tableSel === "__new__" ? "active" : "", onclick: () => { ui.tableSel = "__new__"; render(); } }, "+ New table"),
+    h("button", { onclick: () => importCsvDialog(d.old) }, "Import CSV…"));
 
   const columnEditors = d.columns.map((c, i) => h("span", { class: "row", style: "display:inline-flex;margin:0 8px 6px 0" },
     h("input", { type: "text", class: "mono", style: "width:130px", value: c, oninput: (ev) => {
@@ -1133,9 +1148,9 @@ function renderTablesPage() {
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Columns")),
             h("div", {}, columnEditors, h("button", { class: "btn small", onclick: () => { d.columns.push("column" + (d.columns.length + 1)); render(); } }, "+ Column")))),
         h("div", { class: "card" },
-          h("table", { class: "edit" },
+          h("div", { class: "hscroll" }, h("table", { class: "edit wide" },
             h("thead", {}, h("tr", {}, h("th", {}, "Key"), d.columns.map((c) => h("th", {}, c)), h("th", {}, "Items"), h("th", {}))),
-            h("tbody", {}, rows)),
+            h("tbody", {}, rows))),
           h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.rows.push({ key: "", orig: null, values: {} }); render(); } }, "+ Row")),
         h("div", { class: "row" },
           h("button", { class: "btn primary", onclick: save }, d.old ? "Save table" : "Create table"),
@@ -1144,16 +1159,139 @@ function renderTablesPage() {
           d.old ? h("button", { class: "btn danger", onclick: del }, "Delete table…") : null))));
 }
 
+/* Import a CSV file (e.g. an Unreal DataTable export) into a table, for reference. */
+async function importCsvDialog(defaultTable) {
+  const st = { csv: null, preview: null, fileName: "" };
+  const file = h("input", { type: "file", accept: ".csv,text/csv" });
+  const table = h("input", { type: "text", class: "mono", value: defaultTable || "", list: "csv-tables", placeholder: "table name" });
+  const keyCase = h("select", {}, [["auto", "match the table (lower case if its keys are)"], ["lower", "lower case"], ["keep", "as in the file"]]
+    .map(([v, l]) => h("option", { value: v }, l)));
+  const keySel = h("select", { onchange: () => renderColumns(false) });
+  const colsBox = h("div", { class: "hint" }, "Choose a CSV file. The first row must name the columns.");
+  const fillsBox = h("div");
+  const fills = [];
+  const report = h("div");
+  const colState = [];
+
+  const renderFills = () => {
+    const header = st.preview ? st.preview.header : [];
+    const targetCols = (S.tables[table.value] || { columns: [] }).columns;
+    fillsBox.replaceChildren(h("div", {}, h("datalist", { id: "csv-fill-targets" }, targetCols.map((c) => h("option", { value: c }))),
+      fills.map((f, n) => {
+        const src = h("select", { onchange: (ev) => { f.source = ev.target.value; } }, header.map((c) => h("option", { value: c }, c)));
+        src.value = f.source;
+        return h("div", { class: "row", style: "margin-bottom:6px" },
+          h("input", { type: "text", class: "mono", value: f.target, list: "csv-fill-targets", placeholder: "table column, e.g. name",
+            oninput: (ev) => { f.target = ev.target.value; } }),
+          h("span", {}, "←"), src,
+          h("button", { class: "btn icon", onclick: () => { fills.splice(n, 1); renderFills(); } }, "✕"));
+      }),
+      st.preview ? h("button", { class: "btn small", onclick: () => { fills.push({ target: "", source: header[1] || header[0] }); renderFills(); } }, "+ Fill a column where it is empty") : null));
+  };
+
+  const renderColumns = (fresh) => {
+    const p = st.preview;
+    if (fresh) {
+      keySel.replaceChildren(...p.header.map((c, n) => h("option", { value: String(n) }, c)));
+      keySel.value = "0";
+      colState.length = 0;
+      p.header.forEach((c, n) => {
+        const samples = p.samples.map((r) => r[n]).filter(Boolean);
+        const looksLikeClass = samples.length > 0 && samples.every((v) => /_C$/.test(v));
+        colState.push({ include: !looksLikeClass, target: p.columns[n], samples });
+      });
+    }
+    const key = Number(keySel.value || 0);
+    const rows = p.header.map((c, n) => {
+      const st2 = colState[n];
+      const isKey = n === key;
+      return h("tr", { "data-col": n, class: isKey ? "hint" : "" },
+        h("td", { class: "narrow" }, isKey ? "" : h("input", { type: "checkbox", checked: st2.include, onchange: (ev) => { st2.include = ev.target.checked; } })),
+        h("td", { class: "mono" }, c),
+        h("td", {}, isKey ? h("i", {}, "row key") : h("input", { type: "text", class: "mono", value: st2.target, oninput: (ev) => { st2.target = ev.target.value; } })),
+        h("td", { class: "hint", style: "max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", title: st2.samples.join("\n") }, st2.samples[0] || ""));
+    });
+    colsBox.replaceChildren(
+      h("p", { class: "hint" }, `${plural(p.rows, "row")}. Each ticked column is stored under the name on the right; columns that look like class references start unticked.`),
+      h("div", { class: "hscroll" }, h("table", { class: "edit" },
+        h("thead", {}, h("tr", {}, h("th", {}), h("th", {}, "CSV column"), h("th", {}, "Store as"), h("th", {}, "Example"))),
+        h("tbody", {}, rows))));
+    renderFills();
+  };
+
+  file.addEventListener("change", async () => {
+    const f = file.files[0];
+    if (!f) return;
+    st.csv = await f.text();
+    st.fileName = f.name;
+    if (!table.value) table.value = f.name.replace(/\.[^.]+$/, "").replace(/\W+/g, "_").toLowerCase();
+    try {
+      st.preview = (await request("table/csv-preview", { csv: st.csv })).result;
+      renderColumns(true);
+    } catch (e) { colsBox.replaceChildren(h("div", { class: "problems" }, e.message)); }
+  });
+
+  const body = () => {
+    const key = Number(keySel.value || 0);
+    const only = [], rename = {};
+    st.preview.header.forEach((c, n) => {
+      if (n === key || !colState[n].include) return;
+      only.push(c);
+      if (colState[n].target && colState[n].target !== st.preview.columns[n]) rename[c] = colState[n].target;
+    });
+    return {
+      name: table.value.trim(), csv: st.csv, key_column: st.preview.header[key], only, rename,
+      fills: fills.filter((f) => f.target.trim()).map((f) => [f.target.trim(), f.source]), key_case: keyCase.value,
+    };
+  };
+  const showReport = (r) => report.replaceChildren(h("pre", { class: "json" }, r.lines.join("\n")));
+
+  const done = await modal({
+    title: "Import a CSV file into a table", wide: true,
+    body: h("div", { class: "stack" },
+      h("p", { class: "hint" }, "For reference data such as an Unreal Engine DataTable export. NSLOCTEXT(...) text, row handles and asset paths are cleaned up. Keys match existing rows ignoring case. The file's columns are added next to the table's own columns, so nothing your items use changes unless you store a CSV column under one of those names."),
+      h("div", { class: "field" }, file),
+      h("div", { class: "row" },
+        h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Table")), table,
+          h("datalist", { id: "csv-tables" }, Object.keys(S.tables).map((t) => h("option", { value: t })))),
+        h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Key column")), keySel),
+        h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "New keys")), keyCase)),
+      colsBox,
+      h("div", {}, h("div", { class: "label hint" }, "Fill empty table columns from the file (existing values are kept; differences are reported):"), fillsBox),
+      report),
+    actions: [
+      { label: "Cancel", value: null },
+      { label: "Preview", run: async () => {
+        if (!st.preview) { toast("Choose a CSV file first.", true); return undefined; }
+        try { showReport((await request("table/import", { ...body(), dry_run: true })).result); } catch (e) { toast(e.message, true); }
+        return undefined;
+      } },
+      { label: "Import", class: "primary", run: async () => {
+        if (!st.preview) { toast("Choose a CSV file first.", true); return undefined; }
+        const r = await mutate("table/import", body(), (res) => `Imported ${res.added.length + res.updated.length} rows into ${res.table}.`);
+        return r ? r : undefined;
+      } },
+    ],
+  });
+  if (done) {
+    ui.tableSel = done.table;
+    ui.tableDraft = null;
+    render();
+    modal({ title: `Imported into ${done.table}`, body: h("pre", { class: "json" }, done.lines.join("\n")) });
+  }
+}
+
 /* ------------------------------------------------------------ series page */
 
 function makeSeriesDraft(key) {
   if (!key || key === "__new__") {
-    return { for: key, is_new: true, key: "", name: "", first_id: "", last_id: "", template: "", containers: [], generators: [] };
+    return { for: key, is_new: true, key: "", name: "", first_id: "", last_id: "", template: "", secret: "", containers: [], generators: [] };
   }
   const s = S.series[key];
   return {
     for: key, is_new: false, key, name: s.name || "", first_id: s.first_id, last_id: s.last_id,
     template: typeof s.description_template === "string" ? s.description_template : "",
+    secret: Array.isArray(s.secret) ? s.secret.join(", ") : (s.secret || ""),
     containers: Object.entries(s.containers || {}).map(([id, cfg]) => ({ id, exclude: ((cfg || {}).exclude || []).join(", ") })),
     generators: Object.entries(s.generators || {}).map(([id, rule]) => ({ id, rule })),
   };
@@ -1194,6 +1332,7 @@ function renderSeriesPage() {
     const config = {
       name: d.name.trim(), last_id: Number(d.last_id),
       description_template: d.template,
+      secret: d.secret.includes(",") ? d.secret.split(",").map((x) => x.trim()).filter(Boolean) : d.secret.trim(),
       containers: Object.fromEntries(d.containers.filter((c) => c.id).map((c) => [c.id, { exclude: c.exclude.split(/[,\s]+/).filter(Boolean) }])),
       generators: Object.fromEntries(d.generators.filter((g) => g.id).map((g) => [g.id, g.rule])),
     };
@@ -1212,7 +1351,7 @@ function renderSeriesPage() {
 
   return h("div", { class: "page" },
     h("h2", {}, "Series setup"),
-    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it, and that number is written into their descriptions. Containers get a list of the series' items at {contents}; generators listed here always hold every series item with the given tags."),
+    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it, and that number is written into their descriptions. Containers get a list of the series' items at {contents}, and can use {count}, {count_no_secret}, {count_secret} and {series_name}; generators listed here always hold every series item with the given tags."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
         h("div", { class: "card" },
@@ -1223,7 +1362,10 @@ function renderSeriesPage() {
           h("div", { class: "row" },
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "First ID")), input("first_id", { type: "number", disabled: !d.is_new })),
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Last ID"), h("span", {}, "room to grow")), input("last_id", { type: "number" }))),
-          s ? h("p", { class: "hint" }, `${plural(s.members.length, "item")}; IDs used up to ${s.allocated_through ?? "—"}; next free ID ${s.next_id}.`) : null,
+          s ? h("p", { class: "hint" }, `${plural(s.members.length, "item")} (${s.members.length - s.secret_ids.length} + ${s.secret_ids.length} secret rares); IDs used up to ${s.allocated_through ?? "—"}; next free ID ${s.next_id}.`) : null,
+          h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Secret rares"),
+            h("span", {}, "items with these tags; empty = the tags the containers leave out")),
+          input("secret", { class: "mono", placeholder: s && !("secret" in s) && s.secret_rules.length ? s.secret_rules.join(", ") + " (from the containers)" : "e.g. rarity:epic" })),
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Description template"), h("span", {}, "empty = the global one")),
             (() => { const ta = h("textarea", { rows: 2, class: "mono", placeholder: S.settings.description_template, oninput: (ev) => { d.template = ev.target.value; } }); ta.value = d.template; return ta; })())),
         h("div", { class: "card" },
@@ -1307,7 +1449,7 @@ function renderSettingsPage() {
   tmpl.value = typeof S.settings.description_template === "string" ? S.settings.description_template : JSON.stringify(S.settings.description_template);
   const templateCard = h("div", { class: "card" },
     h("h3", {}, "Series line in descriptions"),
-    h("p", { class: "hint" }, "Applied to every series item's description. Fields: {description}, {series_name}, {index}, {count}, {series}, {itemdefid}, {name}, {tags[rarity]} and the item's own fields."),
+    h("p", { class: "hint" }, "Applied to every series item's description. Fields: {description}, {series_name}, {index}, {count}, {count_no_secret}, {count_secret}, {series}, {itemdefid}, {name}, {tags[rarity]} and the item's own fields."),
     tmpl,
     h("div", { class: "row", style: "margin-top:8px" }, h("span", { style: "flex:1" }),
       h("button", { class: "btn primary", onclick: () => mutate("settings/save", { description_template: tmpl.value }, "Saved the template.") }, "Save")));

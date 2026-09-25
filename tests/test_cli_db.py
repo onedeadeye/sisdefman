@@ -119,6 +119,37 @@ class DatabaseCommandTests(unittest.TestCase):
         code, out = self.cli("set", "110", "flavor=Harmless")  # does not change the name
         self.assertEqual(code, 0, out)
 
+    def test_secret_rares_setting(self):
+        self.assertIn("8 items (6 + 2 secret)", self.cli("list")[1])
+        code, out = self.cli("series", "set", "crate1", "--secret", "rarity:rare")
+        self.assertEqual(code, 0, out)
+        self.assertIn("8 items (7 + 1 secret)", self.cli("list")[1])
+        self.assertIn("secret rares: items tagged rarity:rare: 1 of 8", self.cli("series")[1])
+        self.cli("series", "set", "crate1", "--secret", "")
+        self.assertIn("(from the containers): 2 of 8", self.cli("series")[1])
+
+    def test_table_import(self):
+        path = os.path.join(self.dir, "weapons.csv")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(fixtures.WEAPON_CSV)
+        code, out = self.cli("table", "import", "weapon", path, "--skip", "ActorClass", "--fill", "name=DisplayName", "-n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 row(s) added, 2 matched existing rows", out)
+        self.assertIn("rifle.name is 'Rifle'; the file's DisplayName is 'Long Rifle'", out)
+        self.assertIn("Dry run", out)
+        self.cli("mode", "release")
+        # Storing DisplayName as name would rename live items: refused without confirmation.
+        code, out = self.cli("table", "import", "weapon", path, "--only", "DisplayName", "--map", "DisplayName=name")
+        self.assertEqual(code, 1)
+        self.assertIn("'Rifle | Blue' -> 'Long Rifle | Blue'", out)
+        code, out = self.cli("table", "import", "weapon", path)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.export("after.json"), self.before)
+        code, out = self.cli("table", "show", "weapon", "-c", "name,Range")
+        self.assertIn("knife             SHORT  0", out)  # the earlier --fill was a dry run
+        code, out = self.cli("query", "-w", "weapon.Range=LONG", "-f", "id,weapon.Description")
+        self.assertIn("111  Reaches far.", out)
+
     def test_schema_show_and_export(self):
         code, out = self.cli("schema")
         self.assertIn("kind skin  (8 item(s))", out)
