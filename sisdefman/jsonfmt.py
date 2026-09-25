@@ -1,5 +1,6 @@
 """JSON output in the style of Steam's item definition files (four-space
-indent), with short lists of plain values kept on one line."""
+indent), with short lists of plain values, and short nested objects of plain
+values (table rows, field specs), kept on one line."""
 
 from __future__ import annotations
 
@@ -19,6 +20,11 @@ def _fmt(o, level: int) -> str:
     if isinstance(o, dict):
         if not o:
             return "{}"
+        if level >= 3 and all(not isinstance(v, (dict, list)) for v in o.values()):
+            one = "{" + ", ".join(f"{json.dumps(str(k), ensure_ascii=False)}: {json.dumps(v, ensure_ascii=False)}"
+                                  for k, v in o.items()) + "}"
+            if len(inner) + len(one) <= WIDTH:
+                return one
         parts = [f"{inner}{json.dumps(str(k), ensure_ascii=False)}: {_fmt(v, level + 1)}" for k, v in o.items()]
         return "{\n" + ",\n".join(parts) + "\n" + pad + "}"
     if isinstance(o, list):
@@ -31,3 +37,13 @@ def _fmt(o, level: int) -> str:
         parts = [inner + _fmt(x, level + 1) for x in o]
         return "[\n" + ",\n".join(parts) + "\n" + pad + "]"
     return json.dumps(o, ensure_ascii=False)
+
+
+def write(path: str, obj) -> None:
+    """Write ``obj`` to ``path`` atomically."""
+    import os
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(dumps(obj))
+    os.replace(tmp, path)

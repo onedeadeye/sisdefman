@@ -17,7 +17,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import steam
+from . import derive, steam
 from .project import Project, ProjectError
 
 
@@ -113,7 +113,12 @@ def _prepare_new_item(project: Project, key: str, item: dict, result: OpResult) 
     if "itemdefid" in item:
         result.notes.append(f"ignored itemdefid {item.pop('itemdefid')} on {item.get('name', 'new item')!r}; "
                             "series items are numbered by position")
-    item.setdefault("type", "item")
+    kind = project.schema().kind_of(item)
+    if kind is None:
+        item.setdefault("type", "item")
+    elif "tags" in derive.rules_of(kind) and "tags" not in item:
+        # The kind's rule builds the tags (normally including series:{series}).
+        return {"itemdefid": 0, **item}
     old_series = steam.tag_values(item, "series")
     if steam.set_single_tag(item, "series", key):
         was = f" (was series:{old_series[0]})" if old_series else ""

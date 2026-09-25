@@ -1,19 +1,23 @@
 # sisdefman
 
-A command-line tool for managing Steam Inventory Service item definitions that are
-organised into **series**, such as the items in a crate. It keeps every definition in one
-project file and exports one Steam-ready JSON file.
+A tool for managing Steam Inventory Service item definitions. It works like a small
+database: every definition lives in one project file, you edit it in a browser GUI or from
+the command line, and it exports one Steam-ready JSON file.
 
-- Writes each series item's series name and position into its description
+- **Derived fields.** Describe a family of items once as a *kind*. For example, a weapon
+  skin could be defined by its weapon, finish, material ID, rarity and flavor text.
+  sisdefman then builds the name, description, icon URLs, colours and tags from those
+  fields and from lookup tables (weapon → display name).
+- **Series numbering.** Each item's series name and position go into its description
   (`First Series #8`). The text stays correct when items are added, inserted, moved or
   removed.
-- Inserts items in the middle of a series. The items after the new one are renumbered, and
-  every reference to them (`bundle`, `exchange`, `tag_generators`) is rewritten to match.
-- Keeps rarity generators and the item list in a crate's description up to date.
-- Exports dummy placeholders for IDs a series no longer uses, so an old definition never
-  lingers on Steam.
-- Has a **prerelease** and a **release** mode. In release mode, any change that would alter
-  an item players may already own shows a warning and needs explicit confirmation.
+- **Insertion in the middle of a series.** Later items are renumbered. Every reference to
+  them (`bundle`, `exchange`, `tag_generators`), rarity generators and crate item lists are
+  kept up to date.
+- **Prerelease and release modes.** In release mode, any change that would alter an item
+  players may already own shows a warning and needs explicit confirmation.
+- **Dummy placeholders.** IDs a series no longer uses are exported as dummy items, so an old
+  definition never lingers on Steam.
 
 ## Install
 
@@ -28,16 +32,206 @@ python -m sisdefman --help         # or run it from the repository without insta
 
 ```sh
 sisdefman import crate1.json crate2.json playtime.json tag_generators.json
-sisdefman check
+sisdefman gui                      # opens the editor in your browser
 sisdefman export                   # writes itemdefs.json: upload this file in Steamworks
 ```
 
-`import` creates `sisdefman.json` and prints what it detected. To use a different project
-file, pass `-p FILE` or set `SISDEFMAN_PROJECT`. From then on, `sisdefman.json` is the file
-you keep and edit, and `itemdefs.json` is generated from it.
+`import` merges any number of Steam item definition files into `sisdefman.json` and prints
+what it detected. To use a different project file, pass `-p FILE` or set
+`SISDEFMAN_PROJECT`. From then on, `sisdefman.json` is the file you keep (in version
+control, ideally) and `itemdefs.json` is generated from it.
 
-Suppose crate 1 is an item whose description lists its contents, and its items are laid out
-like this. The import then sets up the following:
+## The GUI
+
+`sisdefman gui` starts a local web app and opens it in your browser. It only listens on your
+own machine. Keep the terminal open while you use it.
+
+- **Items.** Browse all items, one series, one kind, or the definitions outside any series,
+  and search by name, ID, tag or field. Select an item to edit it:
+  - fields of its kind, with drop-downs for lookup-table values;
+  - its derived fields, each of which you can override for that one item;
+  - any other Steam fields;
+  - a live preview of the exact JSON Steam will get.
+- **Several items at once.** Tick items to set a field on all of them, convert them to a
+  kind, or detach them.
+- **Series actions.** Add an item at the end or at a chosen position, duplicate, move or
+  remove items.
+- **Item kinds and Lookup tables.** Edit the rules and tables. Previews update as you type.
+- **Series setup.** Set each series' ID range, display name, description template, crates
+  and generators.
+- **Settings & export.**
+  - Switch between prerelease and release mode.
+  - Record the live baseline.
+  - Export, and import more Steam files.
+  - Edit the series line and the dummy item.
+- **Check.** Lists problems, each linked to its item.
+- **Undo.** Covers every change made in the GUI during the session.
+
+In release mode, the GUI shows the same warning and asks for the same typed confirmation as
+the command line.
+
+## Kinds and derived fields
+
+A kind has **fields**, which you enter for each item, and **rules**, which build Steam fields
+from them. A **lookup table** maps keys to values. A field of type `ref` holds a table key,
+and a template reads that row's columns.
+
+```jsonc
+{
+    "tables": {
+        "weapon": {"columns": ["name", "class"], "rows": {"pistol": {"name": "Pistol", "class": "Basic"}}},
+        "rarity": {"columns": ["name", "color"], "rows": {"common": {"name": "Common", "color": "d2d2d2"}}}
+    },
+    "kinds": {
+        "skin": {
+            "fields": {
+                "weapon": {"type": "ref", "table": "weapon"},
+                "finish": {"type": "text"},
+                "mat_id": {"type": "text"},
+                "rarity": {"type": "ref", "table": "rarity"},
+                "flavor": {"type": "multiline", "optional": true}
+            },
+            "derive": {
+                "type": "item",
+                "name": "{weapon.name} | {finish}",
+                "display_type": "{rarity.name} {weapon.class} Weapon",
+                "description": ["Applies the {finish} appearance to the {weapon.name}.", "{flavor}"],
+                "name_color": "{rarity.color}",
+                "icon_url": "https://example.com/{weapon}_{mat_id}_small.png",
+                "icon_url_large": "https://example.com/{weapon}_{mat_id}.png",
+                "tradable": true,
+                "marketable": true,
+                "tags": "type:skin;series:{series};rarity:{rarity};weapon:{weapon}",
+                "mat_id": "{mat_id}"
+            }
+        }
+    }
+}
+```
+
+With that schema, a skin is stored as just its fields:
+
+```json
+{"itemdefid": 110, "kind": "skin", "weapon": "pistol", "finish": "Red", "mat_id": "red", "rarity": "common"}
+```
+
+Everything else is derived on export. Change a weapon's display name in the table, and
+every skin of that weapon follows.
+
+- **Field types:**
+  - `text` and `multiline`;
+  - `number`;
+  - `bool`;
+  - `ref`, which needs a `table`.
+
+  Mark a field `optional` if it may be empty. A `default` is a template used when the field
+  is empty. Fields are not exported unless a rule outputs them, like `"mat_id": "{mat_id}"`
+  above.
+- **Rules:**
+  - A **template** string.
+  - A **list of templates**, one per paragraph. Empty paragraphs are dropped and the rest
+    are joined with a blank line.
+  - Any other JSON value (`true`, a number), which is exported as it is.
+
+  Rules are exported in the order they are listed.
+- **Templates** use Python's format syntax:
+
+  | Syntax | Gives |
+  | --- | --- |
+  | `{field}` | a field's value |
+  | `{weapon.name}` | a column of the table row that a `ref` field points to |
+  | `{series}`, `{series.name}`, `{series.index}`, `{series.count}` | the item's series key, display name, position and size |
+  | `{itemdefid}` | the item's ID |
+  | `{name}` | another derived field (here, the name) |
+  | `{series.index:03d}` | a number padded to three digits |
+  | `{{` | a literal brace |
+
+- **Overrides.** A value stored on an item for a derived field replaces the rule for that
+  item only: `sisdefman set 110 name_color=ff0000`. Remove it again with
+  `sisdefman set 110 --unset name_color`.
+
+### Flavor text
+
+Give the kind an optional `multiline` field (`flavor` above) and put `"{flavor}"` as a
+paragraph of the description rule. Then set it in the GUI's text box, or from the command
+line:
+
+```sh
+sisdefman set 117 "flavor=Found in the jungle. Still warm."
+```
+
+Items without flavor text keep a description without the extra paragraph. The series line
+still comes last:
+
+```text
+Applies the Camo appearance to the Rifle.
+
+Found in the jungle. Still warm.
+
+First Series #8
+```
+
+### Converting existing items (adopt)
+
+Write the schema, load it, and let sisdefman work out each item's fields from its current
+definition:
+
+```sh
+sisdefman schema import skin-schema.json
+sisdefman adopt skin --where tags.type=skin -v
+```
+
+`adopt` matches each rule against the item's stored value. For example, `{weapon.name} |
+{finish}` against `Pistol | Red` gives `finish = Red`. The values it learns fill in the
+lookup tables, so the tables can start empty. Matching repeats across all selected items, so
+a value that is ambiguous in one item is settled by another.
+
+**The export never changes:**
+
+- A stored value that a rule doesn't reproduce is kept as an override and listed in the
+  report.
+- An item whose export would change anyway is left alone and listed with the reason.
+
+`sisdefman detach IDS` turns items back into plain definitions.
+
+## Database-style commands
+
+```sh
+sisdefman query -w rarity=epic -w weapon=pistol -f id,index,name,mat_id
+sisdefman query -w "name~jungle" --format json
+sisdefman query -w series=crate1 -w '!flavor' --format csv > missing-flavor.csv
+
+sisdefman set 110-114 "flavor=Painted by hand."    # a range of IDs
+sisdefman set --where tags.rarity=epic marketable:=false
+sisdefman set 110 --unset name_color
+
+sisdefman table show weapon
+sisdefman table set weapon pistol name=Handgun class=Basic
+sisdefman table rename weapon pistol handgun        # updates every item that uses it
+sisdefman schema                                    # summary of tables and kinds
+sisdefman schema export -o schema.json
+```
+
+- **Conditions** (`-w`/`--where`, all must match):
+  - `FIELD=VALUE`, `FIELD!=VALUE`;
+  - `FIELD~TEXT` (contains, ignoring case), `FIELD!~TEXT`;
+  - `FIELD<N`, `>`, `<=`, `>=`;
+  - a bare `FIELD` (is set) or `!FIELD` (is empty).
+- **What conditions can test:**
+  - the exported fields;
+  - a kind's fields;
+  - one tag (`tags.rarity`);
+  - `id`, `kind`, `series`, `index` and `dummy`.
+- **Values:** `FIELD=TEXT` stores text; `FIELD:=JSON` stores `true`, `5`, etc.
+
+## Series
+
+A series is a named range of itemdefids (`first_id` to `last_id`). Every definition in the
+range belongs to the series. An item's **index** is its position in the range, counting
+from 1 at the lowest ID and skipping unused IDs. The part of the range after the last item
+is free space for new items.
+
+From definitions laid out like the table below, `import` sets up the following:
 
 | Found | Becomes |
 | --- | --- |
@@ -48,40 +242,32 @@ like this. The import then sets up the following:
 | The list of names in crate 1's description | `{contents}`, generated from every item not tagged `rarity:epic` |
 | Generators 101-104, whose bundles hold exactly one rarity | rules such as `rarity:common`, so new items join them automatically |
 
-If a crate's list is out of date, the import prints the difference, for example when a crate
-still lists `Rifle | Old Name` after the item was renamed to `Rifle | Camo`.
-
-## Series
-
-A series is a named range of itemdefids (`first_id` to `last_id`). Every definition in the
-range belongs to the series. An item's **index** is its position in the range, counting
-from 1 at the lowest ID and skipping unused IDs. The part of the range after the last item
-is free space for new items.
+If a crate's list is out of date, the import prints the difference.
 
 ### What is generated on export
 
-Everything else is exported exactly as stored, including field order.
-
 | What | Stored in the project as | Exported as |
 | --- | --- | --- |
-| Descriptions of series items | the plain description | the description template filled in (below) |
+| Items of a kind | the kind's fields and any overrides | the kind's rules applied |
+| Descriptions of series items | the plain description (or the kind's rule) | the series line added (below) |
 | Descriptions of containers (crates) | text containing `{contents}` | `{contents}` replaced by the names of the series' items, one per line, leaving out items with an `exclude` tag |
 | Bundles of the generators listed in a series' `generators` | a tag rule, e.g. `rarity:common` | every series item with that tag, in series order |
 | Unused IDs from `first_id` to `allocated_through` | nothing | dummy items built from `settings.dummy_item` |
 
-Steam keeps its current definition for any itemdefid that an upload leaves out, so an ID a
-series stops using is exported as a dummy item instead of being dropped.
+Everything else is exported exactly as stored, including field order. Steam keeps its
+current definition for any itemdefid that an upload leaves out, so an ID a series stops
+using is exported as a dummy item instead of being dropped.
 
-### Description template
+### The series line
 
-The default is `{description}\n\n{series_name} #{index}`. It uses Python format syntax and
-these fields:
+The default is `{description}\n\n{series_name} #{index}`. Besides the item's own fields,
+the template can use:
 
 | Field | Value |
 | --- | --- |
-| `{description}` | the item's stored description |
+| `{description}` | the item's description (derived or stored) |
 | `{series_name}` / `{series}` | display name / key of the series |
-| `{index}` / `{count}` | position in the series / number of items in it (e.g. `{index:03d}` pads to 3 digits) |
+| `{index}` / `{count}` | position in the series / number of items in it (`{index:03d}` pads to 3 digits) |
 | `{name}` / `{itemdefid}` | the item's name / ID |
 | `{tags[rarity]}` | the value of one of the item's tags |
 
@@ -89,62 +275,51 @@ these fields:
 sisdefman template '{description}\n\n{series_name} #{index}'   # \n is a line break
 sisdefman series set crate2 --template '{description}\n\n{series_name} - {index} of {count}'
 sisdefman series set crate2 --template ''                       # back to the global one
-sisdefman show 117                                              # preview one exported item
 ```
 
-## Adding, inserting, moving and removing items
+### Adding, inserting, moving and removing items
 
 ```sh
-# Append (safe: nothing is renumbered)
-sisdefman add crate1 --like 121 \
-    --set "name=Rifle | Hot Rod" \
-    --set "description=Applies the Hot Rod appearance to the Rifle." \
-    --set icon_url=https://example.com/rifle_hotrod_small.png \
-    --set icon_url_large=https://example.com/rifle_hotrod.png
-
-# Insert at a position (renumbers everything after it)
-sisdefman add crate1 --after 116 --from new_common.json
-sisdefman add crate1 --position 8 --from several_items.json
-
+sisdefman add crate1 --kind skin weapon=rifle finish=Gold mat_id=gold rarity=common   # append: safe
+sisdefman add crate1 --like 121 finish=Rust mat_id=rust                               # copy, then change
+sisdefman add crate1 --after 116 --from new_item.json                                 # insert: renumbers
 sisdefman move 124 --before 122
 sisdefman remove 118              # later items move down to close the gap
 sisdefman remove 118 --no-shift   # leave a gap (exported as a dummy)
 ```
 
-- **Item fields.** `--from FILE` reads an item object, or a list of items that are added in
-  order. `--like ID` starts from a copy of an existing definition. `--set FIELD=TEXT` and
-  `--set-json FIELD=JSON` (for `true`, numbers, etc.) set fields.
-- **IDs and tags.** The itemdefid comes from the item's position. The `series:` tag is set
-  for you.
+- **Item fields.** Items are given as `FIELD=VALUE` / `FIELD:=JSON`, with `--kind`, as a
+  copy of another item (`--like ID`), or from a JSON file with one item or a list
+  (`--from FILE`).
+- **IDs and tags.** The itemdefid comes from the item's position. A plain item gets the
+  `series:` tag set for you; a kind's tags rule normally includes `series:{series}`.
 - **Renumbering.** Only the consecutive run of items after the change is renumbered. An
   unused ID absorbs the shift.
 - **Removing referenced items.** `remove` refuses while another definition refers to the
   item. Generators with a series rule don't count.
-- **Previewing.** Add `-n` / `--dry-run` to any of these commands to see the effect without
-  saving.
+- **Previewing.** Add `-n` / `--dry-run` to any change to see its effect without saving.
 - **Series size.** When a series runs out of room, raise its limit with
   `sisdefman series set crate1 --last-id N`. The IDs after it must be free.
-
-To edit anything else (names, icons, tags, crate descriptions, generators outside series),
-edit `sisdefman.json` directly and run `sisdefman check`.
 
 ## Prerelease and release mode
 
 Steam inventories store itemdefids. If the definition behind an ID changes to a different
 item, every player who owns that ID ends up with the new item. Inserting, moving or removing
-series items does exactly that.
+series items does exactly that, and so does renaming a live item through a table or a rule.
 
-- **`prerelease`** (the default) lets these operations happen freely and reports what was
+- **`prerelease`** (the default) lets these changes happen freely and reports what was
   renumbered.
 - **`release`** records which definitions are live, meaning every item players can own.
   Any change that would alter one of them then stops with a warning listing every affected
-  ID (`#117 'Rifle | Camo' -> 'Pistol | Stripes'`). To go ahead, you
-  must type `CHANGE PLAYER INVENTORIES` or pass `--accept-inventory-changes`. Without a
-  terminal and without the flag, the change is refused.
+  ID (`#117 'Rifle | Camo' -> 'Pistol | Stripes'`). To go ahead, you must type
+  `CHANGE PLAYER INVENTORIES` (in the terminal or the GUI) or pass
+  `--accept-inventory-changes`. Without a terminal and without the flag, the change is
+  refused.
 
 Release mode checks each change twice:
 
-1. **At the operation.** `add`, `move` and `remove` check the IDs they would change.
+1. **At the change itself.** This covers `add`, `move`, `remove`, `set`, `table`, `schema
+   import`, `adopt`, and every edit in the GUI.
 2. **At export.** `export` compares the whole export with the live record, which also
    catches changes made by editing the project file by hand. Use `sisdefman diff` to see
    the same comparison without exporting.
@@ -161,33 +336,40 @@ comparison starts from what is actually on Steam. Forgetting is safe: you will j
 same warning again.
 
 If a live item is replaced by a dummy (`remove --no-shift`), players still hold that ID, so
-it stays protected. In release mode, `add` without a position skips such retired IDs and
-uses the next free one. Appending is always safe.
+it stays protected. In release mode, appending to a series skips such retired IDs and uses
+the next free one. Appending is always safe.
 
-## Other commands
+## All commands
 
 | Command | Does |
 | --- | --- |
-| `sisdefman list [SERIES]` | series overview, or the items of one series with index and ID (`--all` for every definition) |
-| `sisdefman show ID [--stored]` | one definition as exported (or as stored) |
-| `sisdefman check` | validates the project: unparsable bundles, references to undefined IDs, overlapping series, `series:` tags outside their series, etc. |
-| `sisdefman diff [--against FILE ...] [-v]` | what changed compared with the live baseline, or with Steam item definition files |
-| `sisdefman series` | shows each series' range, containers and generator rules |
-| `sisdefman series new KEY --first-id N --last-id N [--name NAME]` | creates an empty series |
-| `sisdefman series set KEY [--name] [--last-id] [--template] [--container ID [--exclude TAG]] [--generator ID=TAGS] [--remove ID]` | configures one |
-| `sisdefman import FILE ... [--replace]` | adds more files to an existing project |
+| `import FILE ... [--replace]` | create the project, or add more Steam files to it |
+| `export [-o FILE] [--mark-live]` | write every definition to one Steam-ready file |
+| `gui [--port N] [--no-browser]` | open the graphical editor |
+| `check` | validate the project (schema, templates, references, series, colours...) |
+| `list [SERIES] [--all]` / `show ID [--stored]` | series overview / one definition as exported |
+| `query` / `set` | find and change items (see above) |
+| `add` / `move` / `remove` | change a series (see above) |
+| `adopt KIND IDS` / `detach IDS` | convert items to a kind and back |
+| `schema [export \| import FILE]` | show, export or import tables and kinds |
+| `table [show \| new \| set \| delete \| rename]` | edit lookup tables |
+| `series [new \| set]` | show or configure series (range, name, template, containers, generators) |
+| `template [TEXT]` | show or set the series line |
+| `mode [prerelease \| release]` / `mark-live` / `diff [--against FILE]` | release protection |
 
 ## The project file
 
 ```jsonc
 {
-    "sisdefman": 1,
+    "sisdefman": 2,
     "appid": 480,
     "mode": "prerelease",
     "settings": {
         "description_template": "{description}\n\n{series_name} #{index}",
         "dummy_item": { "type": "item", "name": "Dummy Item #{itemdefid}", "description": "This is a dummy item.", ... }
     },
+    "tables": { ... },                    // lookup tables (see above)
+    "kinds": { ... },                     // item kinds (see above)
     "series": {
         "crate1": {
             "name": "First Series",
@@ -198,14 +380,21 @@ uses the next free one. Appending is always safe.
             "generators": { "101": "rarity:common", "102": "rarity:uncommon", "103": "rarity:rare", "104": "rarity:epic" }
         }
     },
-    "items": [ ... every definition, in Steam's format ... ],
+    "items": [
+        {"itemdefid": 1, "type": "item", "name": "First Crate", "description": "...\n\n{contents}\n\n..."},
+        {"itemdefid": 110, "kind": "skin", "weapon": "pistol", "finish": "Red", "mat_id": "red", "rarity": "common"}
+    ],
     "live": null                          // release mode: { "recorded_at": ..., "items": { "110": "Pistol | Red", ... } }
 }
 ```
 
-Series items store their plain description, and crates store `{contents}` where the item
-list goes. Dummy items inside a series' range are not stored. A generator bundle listed
-under `generators` is rewritten whenever the project is saved.
+- An item without a `kind` holds its Steam definition as it is.
+- An item with a `kind` holds the kind's fields plus any overrides.
+- Series items store their plain description, and crates store `{contents}` where the item
+  list goes.
+- Dummy items inside a series' range are not stored.
+- The project file can be edited by hand. `sisdefman check` reports mistakes.
+- Version 1 project files are upgraded automatically.
 
 ## Development
 

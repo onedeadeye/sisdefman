@@ -115,3 +115,33 @@ def write_files(directory):
 
 def all_items():
     return {it["itemdefid"]: copy.deepcopy(it) for doc in (crate_file(), extras_file()) for it in doc["items"]}
+
+
+def skin_schema():
+    """A kind that reproduces the crate items above from four fields."""
+    return {
+        "tables": {
+            "weapon": {"columns": ["name"], "rows": {}},
+            "rarity": {"columns": ["color"], "rows": {}},
+        },
+        "kinds": {
+            "skin": {
+                "fields": {
+                    "weapon": {"type": "ref", "table": "weapon"},
+                    "finish": {"type": "text"},
+                    "rarity": {"type": "ref", "table": "rarity"},
+                    "flavor": {"type": "multiline", "optional": True},
+                },
+                "derive": {
+                    "type": "item",
+                    "name": "{weapon.name} | {finish}",
+                    "description": ["Applies the {finish} appearance to the {weapon.name}.", "{flavor}"],
+                    "name_color": "{rarity.color}",
+                    "background_color": "292929",
+                    "tradable": True,
+                    "marketable": True,
+                    "tags": "type:skin;series:{series};rarity:{rarity};weapon:{weapon}",
+                },
+            }
+        },
+    }

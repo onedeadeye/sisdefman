@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from . import steam
+from . import derive, steam
 from .project import CONTENTS_TOKEN, Project, ProjectError
 
 LEVELS = ("error", "warning", "note")
@@ -28,8 +28,10 @@ def check_project(project: Project) -> List[Issue]:
     def add(level: str, text: str, itemdefid: Optional[int] = None) -> None:
         issues.append(Issue(level, text, itemdefid))
 
+    for problem in derive.check_definitions(project.schema()):
+        add("error", problem)
     try:
-        built = project.build()
+        built, problems = project.build_with_problems()
     except (ProjectError, steam.SyntaxProblem) as e:
         add("error", str(e))
         return issues
@@ -38,7 +40,11 @@ def check_project(project: Project) -> List[Issue]:
     containers = {cid: key for key in project.series for cid in project.container_ids(key)}
 
     # ------------------------------------------------------------ each item
-    for it in project.items:
+    for i, found in problems.items():
+        for problem in found:
+            add("error" if problem.startswith("unknown kind") else "warning", problem, i)
+    records = project.by_id()
+    for it in (exported[i] for i in records):
         i = it["itemdefid"]
         if i <= 0:
             add("error", "itemdefid must be positive", i)
@@ -104,7 +110,7 @@ def check_project(project: Project) -> List[Issue]:
             if gaps:
                 add("note", f"series {key!r}: unused ID(s) {_ranges(gaps)} between its items are exported "
                             "as dummy items")
-        for m in members:
+        for m in (exported[r["itemdefid"]] for r in members):
             if key not in steam.tag_values(m, "series"):
                 add("warning", f"is in series {key!r} but not tagged series:{key}", m["itemdefid"])
             elif len(steam.tag_values(m, "series")) > 1:

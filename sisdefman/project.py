@@ -3,6 +3,11 @@
 A project is one JSON file that holds every item definition for an app plus
 the metadata sisdefman needs to manage them:
 
+* ``items``   - one record per itemdefid. A record without a ``kind`` holds
+  the Steam definition as-is; a record with a kind holds that kind's fields
+  and any overrides, and the rest is derived (see ``derive``).
+* ``tables``  - lookup tables used by kinds (e.g. weapon -> display name).
+* ``kinds``   - families of items whose fields are derived from templates.
 * ``series``  - ordered groups of items that occupy a contiguous ID range.
   An item's position within its series decides both its itemdefid and the
   "#index" written into its description.
@@ -23,9 +28,11 @@ import json
 import os
 from typing import Dict, List, Optional, Tuple
 
-from . import jsonfmt, steam
+from . import derive, jsonfmt, steam
+from .derive import SeriesInfo
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+KEY_ORDER = ("sisdefman", "appid", "mode", "settings", "tables", "kinds", "series", "items", "live")
 MODES = ("prerelease", "release")
 
 # Placeholder in a container's description that is replaced by the list of
@@ -54,13 +61,6 @@ class ProjectError(Exception):
     """The project file is malformed or an operation cannot be performed."""
 
 
-class _Tags(dict):
-    """``{tags[rarity]}`` in a description template; missing categories are blank."""
-
-    def __missing__(self, key):
-        return ""
-
-
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -83,6 +83,8 @@ class Project:
                 "description_template": DEFAULT_DESCRIPTION_TEMPLATE,
                 "dummy_item": copy.deepcopy(DEFAULT_DUMMY_ITEM),
             },
+            "tables": {},
+            "kinds": {},
             "series": {},
             "items": [],
             "live": None,
@@ -106,7 +108,9 @@ class Project:
         return cls(data, path)
 
     def to_json(self) -> str:
-        return jsonfmt.dumps(self.data)
+        ordered = {k: self.data[k] for k in KEY_ORDER if k in self.data}
+        ordered.update((k, v) for k, v in self.data.items() if k not in ordered)
+        return jsonfmt.dumps(ordered)
 
     def save(self, path: Optional[str] = None) -> None:
         path = path or self.path
@@ -121,6 +125,8 @@ class Project:
 
     def _check_shape(self) -> None:
         d = self.data
+        if d.get("sisdefman") == 1:
+            d["sisdefman"] = FORMAT_VERSION  # version 2 only adds tables and kinds
         if d.get("sisdefman") != FORMAT_VERSION:
             raise ProjectError(f"unsupported project format version {d.get('sisdefman')!r}")
         if d.get("mode") not in MODES:
@@ -129,6 +135,8 @@ class Project:
         d["settings"].setdefault("description_template", DEFAULT_DESCRIPTION_TEMPLATE)
         d["settings"].setdefault("dummy_item", copy.deepcopy(DEFAULT_DUMMY_ITEM))
         d.setdefault("series", {})
+        d.setdefault("tables", {})
+        d.setdefault("kinds", {})
         d.setdefault("items", [])
         d.setdefault("live", None)
         if not isinstance(d["items"], list):
@@ -140,6 +148,11 @@ class Project:
             if it["itemdefid"] in seen:
                 raise ProjectError(f"itemdefid {it['itemdefid']} is defined more than once")
             seen.add(it["itemdefid"])
+            if "kind" in it and not isinstance(it["kind"], str):
+                raise ProjectError(f"itemdefid {it['itemdefid']}: kind must be a string")
+        for field in ("tables", "kinds"):
+            if not isinstance(d[field], dict):
+                raise ProjectError(f"{field} must be an object keyed by name")
         if not isinstance(d["series"], dict):
             raise ProjectError("series must be an object keyed by series name")
         for key, s in d["series"].items():
@@ -191,6 +204,17 @@ class Project:
     @property
     def live(self) -> Optional[dict]:
         return self.data.get("live")
+
+    @property
+    def tables(self) -> Dict[str, dict]:
+        return self.data["tables"]
+
+    @property
+    def kinds(self) -> Dict[str, dict]:
+        return self.data["kinds"]
+
+    def schema(self) -> derive.Schema:
+        return derive.Schema(self.tables, self.kinds)
 
     def by_id(self) -> Dict[int, dict]:
         return {it["itemdefid"]: it for it in self.items}
@@ -255,28 +279,51 @@ class Project:
     def series_name(self, key: str) -> str:
         return self.get_series(key).get("name") or key
 
-    def render_description(self, key: str, item: dict, index: int, count: int) -> str:
+    def series_positions(self) -> Dict[int, SeriesInfo]:
+        out = {}
+        for key in self.series:
+            members = self.members(key)
+            for index, m in enumerate(members, 1):
+                out[m["itemdefid"]] = SeriesInfo(key, self.series_name(key), index, len(members))
+        return out
+
+    def resolve_all(self) -> Tuple[Dict[int, dict], Dict[int, List[str]]]:
+        """Every record turned into its Steam definition (before series text,
+        generator rules and container lists), plus problems per itemdefid."""
+        schema = self.schema()
+        positions = self.series_positions()
+        resolved, problems = {}, {}
+        for rec in self.items:
+            item, probs = derive.resolve(schema, rec, positions.get(rec["itemdefid"]))
+            resolved[rec["itemdefid"]] = item
+            if probs:
+                problems[rec["itemdefid"]] = probs
+        return resolved, problems
+
+    def resolve(self, record: dict) -> Tuple[dict, List[str]]:
+        """One record (which need not be saved) as a Steam definition without
+        series text."""
+        return derive.resolve(self.schema(), record, self.series_positions().get(record["itemdefid"]))
+
+    def render_description(self, key: str, item: dict, index: int, count: int,
+                           record: Optional[dict] = None) -> str:
+        """The series description template applied to ``item`` (a resolved
+        definition). ``record`` gives access to its kind's fields."""
         template = self.description_template(key)
         base = item.get("description") or ""
-        fields = {
-            "description": base,
-            "series": key,
-            "series_name": self.series_name(key),
-            "index": index,
-            "count": count,
-            "itemdefid": item["itemdefid"],
-            "name": item.get("name", ""),
-            "tags": _Tags((cat, val) for cat, val in reversed(steam.parse_tags(item.get("tags")))),
-        }
-        try:
-            text = template.format_map(fields)
-        except KeyError as e:
-            raise ProjectError(
-                f"description template {template!r} uses unknown field {e}; "
-                f"available: {', '.join(TEMPLATE_FIELDS)}"
-            )
-        except (ValueError, IndexError, AttributeError) as e:
-            raise ProjectError(f"description template {template!r} is invalid: {e}")
+        values = dict(record or {})
+        values.update(item)
+        for name in ("description", "name", "tags"):
+            values.setdefault(name, "")
+        info = SeriesInfo(key, self.series_name(key), index, count)
+        ctx = derive.Context(self.schema(), values, info)
+        text = ctx.render_rule(template, "description template")
+        for problem in ctx.problems:
+            if problem.startswith(("unknown field", "description template")):
+                raise ProjectError(
+                    f"description template {template!r}: {problem}; "
+                    f"available: {', '.join(TEMPLATE_FIELDS)}, and the item's own fields"
+                )
         return text.strip() if not base.strip() else text
 
     def template_affixes(self, key: str, item: dict, index: int, count: int) -> Tuple[str, str]:
@@ -288,15 +335,21 @@ class Project:
         before, _, after = text.partition(sentinel)
         return before, after
 
-    def generator_bundle(self, key: str, rule: List[str]) -> str:
-        return ";".join(str(m["itemdefid"]) for m in self.members(key) if steam.has_tags(m, rule))
+    def _resolved_members(self, key: str, resolved: Optional[Dict[int, dict]]) -> List[dict]:
+        if resolved is None:
+            resolved, _ = self.resolve_all()
+        return [resolved[m["itemdefid"]] for m in self.members(key)]
 
-    def container_listing(self, key: str, container_id: int) -> str:
+    def generator_bundle(self, key: str, rule: List[str], resolved: Optional[Dict[int, dict]] = None) -> str:
+        return ";".join(str(m["itemdefid"]) for m in self._resolved_members(key, resolved)
+                        if steam.has_tags(m, rule))
+
+    def container_listing(self, key: str, container_id: int, resolved: Optional[Dict[int, dict]] = None) -> str:
         cfg = {int(k): v for k, v in self.get_series(key)["containers"].items()}.get(container_id) or {}
         excludes = [steam.parse_tag_rule(r) for r in cfg.get("exclude", [])]
         names = [
             m.get("name", "")
-            for m in self.members(key)
+            for m in self._resolved_members(key, resolved)
             if not any(steam.has_tags(m, rule) for rule in excludes)
         ]
         return "\n".join(names)
@@ -310,6 +363,7 @@ class Project:
         before = self.to_json()
         self.items.sort(key=lambda it: it["itemdefid"])
         by_id = self.by_id()
+        resolved = None
         for key, s in self.series.items():
             members = self.members(key)
             if members:
@@ -318,31 +372,40 @@ class Project:
                     s["allocated_through"] = top
             for gid, rule in self.generator_rules(key):
                 gen = by_id.get(gid)
-                if gen is not None:
-                    gen["bundle"] = self.generator_bundle(key, rule)
+                if gen is not None and self.schema().kind_of(gen) is None:
+                    if resolved is None:
+                        resolved, _ = self.resolve_all()
+                    gen["bundle"] = self.generator_bundle(key, rule, resolved)
         return self.to_json() != before
 
     # ------------------------------------------------------------------ build
 
     def build(self) -> List[dict]:
         """The item definitions to upload to Steam, sorted by itemdefid."""
-        out: Dict[int, dict] = {it["itemdefid"]: copy.deepcopy(it) for it in self.items}
+        return self.build_with_problems()[0]
+
+    def build_with_problems(self) -> Tuple[List[dict], Dict[int, List[str]]]:
+        out, problems = self.resolve_all()
+        records = self.by_id()
         for key, s in self.series.items():
             members = self.members(key)
             for index, m in enumerate(members, 1):
-                out[m["itemdefid"]]["description"] = self.render_description(key, m, index, len(members))
+                i = m["itemdefid"]
+                out[i]["description"] = self.render_description(key, out[i], index, len(members), records[i])
+            resolved_members = {m["itemdefid"]: out[m["itemdefid"]] for m in members}
             for gid, rule in self.generator_rules(key):
                 if gid in out:
-                    out[gid]["bundle"] = self.generator_bundle(key, rule)
+                    out[gid]["bundle"] = self.generator_bundle(key, rule, out)
             for cid in self.container_ids(key):
                 c = out.get(cid)
                 if c is not None and CONTENTS_TOKEN in (c.get("description") or ""):
-                    c["description"] = c["description"].replace(CONTENTS_TOKEN, self.container_listing(key, cid))
-            top = max([s.get("allocated_through") or 0] + [m["itemdefid"] for m in members])
+                    c["description"] = c["description"].replace(CONTENTS_TOKEN,
+                                                                self.container_listing(key, cid, out))
+            top = max([s.get("allocated_through") or 0] + list(resolved_members))
             for i in range(s["first_id"], top + 1):
                 if i not in out:
                     out[i] = self.make_dummy(i)
-        return [out[i] for i in sorted(out)]
+        return [out[i] for i in sorted(out)], problems
 
     def export_document(self) -> dict:
         doc = {}

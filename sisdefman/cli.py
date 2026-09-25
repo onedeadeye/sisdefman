@@ -9,8 +9,8 @@ import os
 import sys
 from typing import List, Optional
 
-from . import __version__, check, importer, jsonfmt, ops, safety, steam, ui
-from .project import CONTENTS_TOKEN, MODES, Project, ProjectError
+from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, query, safety, steam, ui
+from .project import MODES, Project, ProjectError
 
 DEFAULT_PROJECT = "sisdefman.json"
 DEFAULT_EXPORT = "itemdefs.json"
@@ -29,11 +29,6 @@ def _unescape(text: str) -> str:
     return text.replace("\\\\", "\x00").replace("\\n", "\n").replace("\x00", "\\")
 
 
-def _write_json(path: str, data) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(jsonfmt.dumps(data))
-    os.replace(tmp, path)
 
 
 def _mode_tag(project: Project) -> str:
@@ -110,7 +105,7 @@ def cmd_export(args) -> int:
             if not ok:
                 return 1
     doc = {"appid": project.appid, "items": built} if project.appid is not None else {"items": built}
-    _write_json(out, doc)
+    jsonfmt.write(out, doc)
     dummies = sum(1 for it in built if project.is_dummy(it))
     print(ui.green(f"Wrote {len(built)} item definitions to {out}") + (f" ({dummies} dummy)" if dummies else ""))
     changed = project.normalize()
@@ -192,6 +187,17 @@ def cmd_show(args) -> int:
     key, index = _series_index(project, args.itemdefid)
     if index:
         print(ui.dim(f"// series {key} #{index}"))
+    record = project.item(args.itemdefid)
+    if record and record.get("kind") and not args.stored:
+        kind = project.schema().kind_of(record)
+        fields = derive.fields_of(kind)
+        print(ui.dim(f"// kind {record['kind']}: " + ", ".join(
+            f"{f}={record.get(f, '')!r}" for f in fields if record.get(f) not in (None, ""))))
+        over = derive.overridden(project.schema(), record)
+        if over:
+            print(ui.dim(f"// overrides: {', '.join(over)}"))
+        for problem in project.resolve(record)[1]:
+            print(ui.yellow(f"// problem: {problem}"))
     print(json.dumps(it, indent=4, ensure_ascii=False))
     return 0
 
@@ -217,47 +223,35 @@ def _new_items(args, project: Project) -> List[dict]:
         base.pop("itemdefid", None)
         items = [base]
     else:
-        items = [{"type": "item"}]
-    for spec, as_json in [(s, False) for s in args.set or []] + [(s, True) for s in args.set_json or []]:
-        field, sep, value = spec.partition("=")
-        if not sep or not field:
-            raise ProjectError(f"expected FIELD=VALUE, got {spec!r}")
-        if field == "itemdefid":
-            raise ProjectError("itemdefid is assigned from the item's position in the series")
-        if as_json:
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError as e:
-                raise ProjectError(f"--set-json {field}: invalid JSON: {e.msg}")
+        items = [{"type": "item"} if not args.kind else {}]
+    if args.kind:
+        if args.kind not in project.kinds:
+            raise ProjectError(f"no kind named {args.kind!r} (known: {', '.join(project.kinds) or 'none'})")
         for it in items:
-            it[field] = value
+            it["kind"] = args.kind
+    assignments = [query.parse_assignment(a) for a in args.assignments or []]
+    assignments += [query.parse_assignment(a) for a in args.set or []]
+    assignments += [query.parse_assignment(a.replace("=", ":=", 1)) for a in args.set_json or []]
+    for field, value in assignments:
+        if field in ("itemdefid", "kind"):
+            raise ProjectError(f"{field} cannot be set this way" +
+                               (" (use --kind)" if field == "kind" else "; it comes from the item's position"))
+        for it in items:
+            if value in ("", None):
+                it.pop(field, None)
+            else:
+                it[field] = value
     return items
 
 
-def _run_series_op(args, project: Project, action: str, advice: Optional[str], op) -> int:
-    print(_mode_tag(project))
-    built_before = project.build()
-    protect = safety.protected_before(project, built_before)
-    result: ops.OpResult = op()
-
-    by_id = project.by_id()
-    for i in result.added:
-        key, index = _series_index(project, i)
-        print(f"+ {by_id[i].get('name', '')!r} becomes {key} #{index}, itemdefid {i}")
-    for i, name in result.removed:
-        print(f"- {name!r} (itemdefid {i}) leaves its series")
-    for note in result.notes:
-        print(ui.dim(f"  note: {note}"))
-    if result.moved:
-        print(f"Renumbered {len(result.moved)} item(s): {', '.join(ops.shift_summary(result.moved))}")
-    for i, fields in result.rewritten:
-        print(ui.dim(f"  updated references in {i} ({by_id[i].get('name', '')}): {', '.join(fields)}"))
-
+def _guarded_save(args, project: Project, protect, action: str, advice: Optional[str] = None) -> int:
+    """Finish a change: in release mode warn about live items it changes and
+    ask for confirmation, then save (or, with --dry-run, don't)."""
     impacts = safety.compare(protect, project, project.build())
     if project.mode == "prerelease" and impacts:
         print(ui.dim(f"  {len(impacts)} existing itemdefid(s) now hold a different item. That is fine before "
                      "release; in release mode this needs confirmation."))
-    if args.dry_run:
+    if getattr(args, "dry_run", False):
         if project.mode == "release" and impacts:
             print(ui.red(f"This would change {len(impacts)} item(s) players own:"))
             for imp in impacts:
@@ -271,13 +265,37 @@ def _run_series_op(args, project: Project, action: str, advice: Optional[str], o
     return 0
 
 
+def _run_series_op(args, project: Project, action: str, advice: Optional[str], op) -> int:
+    print(_mode_tag(project))
+    built_before = project.build()
+    protect = safety.protected_before(project, built_before)
+    names_before = {it["itemdefid"]: it.get("name", "") for it in built_before}
+    result: ops.OpResult = op()
+
+    names = {it["itemdefid"]: it.get("name", "") for it in project.build()}
+    for i in result.added:
+        key, index = _series_index(project, i)
+        print(f"+ {names.get(i, '')!r} becomes {key} #{index}, itemdefid {i}")
+    for i, _ in result.removed:
+        print(f"- {names_before.get(i, '')!r} (itemdefid {i}) leaves its series")
+    for note in result.notes:
+        print(ui.dim(f"  note: {note}"))
+    if result.moved:
+        print(f"Renumbered {len(result.moved)} item(s): {', '.join(ops.shift_summary(result.moved))}")
+    for i, fields in result.rewritten:
+        print(ui.dim(f"  updated references in {i} ({names.get(i, '')}): {', '.join(fields)}"))
+    return _guarded_save(args, project, protect, action, advice)
+
+
 def cmd_add(args) -> int:
     project = _load(args)
     items = _new_items(args, project)
-    names = {m.get("name") for m in project.members(args.series)}
+    built = {it["itemdefid"]: it for it in project.build()}
+    names = {built[m["itemdefid"]].get("name") for m in project.members(args.series)}
     for it in items:
-        if it.get("name") in names:
-            print(ui.yellow(f"warning: series {args.series!r} already has an item named {it.get('name')!r}"))
+        name = project.resolve(dict(it, itemdefid=0))[0].get("name")
+        if name in names:
+            print(ui.yellow(f"warning: series {args.series!r} already has an item named {name!r}"))
     return _run_series_op(
         args, project, "Inserting this item",
         "To avoid it, add the item to the end of the series instead (leave out --position/--before/--after).",
@@ -323,83 +341,30 @@ def cmd_series(args) -> int:
                 print(f"    generator {gid}: every item tagged {rule}")
         return 0
 
+    config = {"name": getattr(args, "name", None)}
     if action == "new":
-        if args.key in project.series:
-            raise ProjectError(f"series {args.key!r} already exists")
-        if args.last_id < args.first_id:
-            raise ProjectError("--last-id must not be before --first-id")
-        project.series[args.key] = {
-            "name": args.name or args.key,
-            "first_id": args.first_id,
-            "last_id": args.last_id,
-            "allocated_through": None,
-            "containers": {},
-            "generators": {},
-        }
-    else:
-        project.get_series(args.key)
-    s = project.series[args.key]
-
-    if getattr(args, "name", None) is not None:
-        s["name"] = args.name
-    if action == "set" and args.last_id is not None:
-        members = project.members(args.key)
-        needed = max([s.get("allocated_through") or 0] + [m["itemdefid"] for m in members])
-        if args.last_id < needed:
-            raise ProjectError(f"series {args.key!r} already uses IDs up to {needed}")
-        blockers = [it["itemdefid"] for it in project.items
-                    if s["last_id"] < it["itemdefid"] <= args.last_id]
-        if blockers:
-            raise ProjectError(f"IDs {', '.join(map(str, blockers[:8]))} are in use by other definitions")
-        s["last_id"] = args.last_id
+        config.update(first_id=args.first_id, last_id=args.last_id)
+    elif args.last_id is not None:
+        config["last_id"] = args.last_id
+    s = project.series.get(args.key, {"containers": {}, "generators": {}})
     if args.template is not None:
-        if args.template == "":
-            s.pop("description_template", None)
-        else:
-            s["description_template"] = _unescape(args.template)
+        config["description_template"] = _unescape(args.template)
     if args.exclude and not args.container:
         raise ProjectError("--exclude applies to the containers given with --container")
-    for cid in args.container or []:
-        s["containers"][str(cid)] = {"exclude": list(args.exclude or [])}
-    for spec in args.generator or []:
-        gid, sep, rule = spec.partition("=")
-        if not sep or not gid.strip().isdigit() or not rule.strip():
-            raise ProjectError(f"--generator expects ITEMDEFID=TAGS, got {spec!r}")
-        s["generators"][str(int(gid))] = rule.strip()
-    for rid in args.remove or []:
-        s["containers"].pop(str(rid), None)
-        s["generators"].pop(str(rid), None)
-
-    for other, o in project.series.items():
-        if other != args.key and o["first_id"] <= s["last_id"] and s["first_id"] <= o["last_id"]:
-            raise ProjectError(f"IDs {s['first_id']}-{s['last_id']} overlap series {other!r}")
-    by_id = project.by_id()
-    for ref in [int(k) for k in s["containers"]] + [int(k) for k in s["generators"]]:
-        if ref not in by_id:
-            raise ProjectError(f"itemdefid {ref} does not exist")
-        if project.series_for_id(ref) is not None:
-            raise ProjectError(f"itemdefid {ref} is inside a series' ID range, so it cannot be a container "
-                               "or generator")
-    for other, o in project.series.items():
-        if other == args.key:
-            continue
-        taken = (set(o["containers"]) | set(o["generators"])) & (set(s["containers"]) | set(s["generators"]))
-        if taken:
-            raise ProjectError(f"itemdefid {', '.join(sorted(taken))} already belongs to series {other!r}")
-    for cid in args.container or []:
-        if CONTENTS_TOKEN not in (by_id[cid].get("description") or ""):
-            print(ui.yellow(f"Put {CONTENTS_TOKEN} in the description of {cid} where the item list should go."))
-    if action == "new":
-        members = project.members(args.key)
-        strays = [m["itemdefid"] for m in members if args.key not in steam.tag_values(m, "series")]
-        if strays:
-            raise ProjectError(
-                f"IDs {', '.join(map(str, strays[:8]))} in that range belong to definitions not tagged "
-                f"series:{args.key}. Every definition in a series' range becomes one of its items, so choose "
-                "a range without them."
-            )
-        if members:
-            print(f"{len(members)} existing definition(s) in that range are now items of the series.")
+    if args.container or args.remove:
+        containers = dict(s["containers"])
+        containers.update({str(cid): {"exclude": list(args.exclude or [])} for cid in args.container or []})
+        config["containers"] = {k: v for k, v in containers.items() if int(k) not in (args.remove or [])}
+    if args.generator or args.remove:
+        generators = dict(s["generators"])
+        for spec in args.generator or []:
+            gid, sep, rule = spec.partition("=")
+            if not sep or not gid.strip().isdigit() or not rule.strip():
+                raise ProjectError(f"--generator expects ITEMDEFID=TAGS, got {spec!r}")
+            generators[str(int(gid))] = rule.strip()
+        config["generators"] = {k: v for k, v in generators.items() if int(k) not in (args.remove or [])}
+    for note in edits.save_series(project, args.key, config, is_new=(action == "new")):
+        print(ui.yellow(note) if "{contents}" in note else note)
     project.save()
     print(ui.green(f"Saved series {args.key!r}."))
     return 0
@@ -520,6 +485,186 @@ def cmd_diff(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- database
+
+DEFAULT_QUERY_FIELDS = ("id", "series", "index", "kind", "name")
+
+
+def _targets(args, project: Project, tokens: List[str]) -> List[int]:
+    ids, rest = query.split_targets(tokens)
+    if rest:
+        raise ProjectError(f"expected itemdefids, got {' '.join(rest)}")
+    if getattr(args, "where", None):
+        ids += [v["id"] for v in query.select(project, args.where)]
+    seen = set()
+    ids = [i for i in ids if not (i in seen or seen.add(i))]
+    if not ids:
+        raise ProjectError("no items selected (give itemdefids such as 110 or 110-134, or --where CONDITION)")
+    return ids
+
+
+def _cell(value) -> str:
+    text = query._text(value).replace("\n", " / ")
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+def cmd_query(args) -> int:
+    project = _load(args)
+    views = query.select(project, args.where or [], include_dummies=args.dummies)
+    fields = [f.strip() for f in args.fields.split(",")] if args.fields else list(DEFAULT_QUERY_FIELDS)
+    if args.format == "json":
+        rows = [{f: v.get(f) for f in fields} for v in views] if args.fields else views
+        print(json.dumps(rows, indent=4, ensure_ascii=False))
+        return 0
+    if args.format == "csv":
+        import csv
+        writer = csv.writer(sys.stdout)
+        writer.writerow(fields)
+        for v in views:
+            writer.writerow([query._text(v.get(f)) for f in fields])
+        return 0
+    table = [fields] + [[_cell(v.get(f)) for f in fields] for v in views]
+    widths = [max(len(row[n]) for row in table) for n in range(len(fields))]
+    for n, row in enumerate(table):
+        line = "  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip()
+        print(ui.bold(line) if n == 0 else line)
+    print(ui.dim(f"{len(views)} item(s)"))
+    return 0
+
+
+def cmd_set(args) -> int:
+    project = _load(args)
+    ids, rest = query.split_targets(args.items)
+    assignments = [query.parse_assignment(a) for a in rest]
+    if not assignments and not args.unset:
+        raise ProjectError("nothing to change: give FIELD=VALUE, FIELD:=JSON or --unset FIELD")
+    ids = _targets(args, project, [str(i) for i in ids])
+    print(_mode_tag(project))
+    protect = safety.protected_before(project, project.build())
+    for note in edits.set_fields(project, ids, assignments, args.unset or []):
+        print(ui.dim(f"  note: {note}"))
+    print(f"Updated {len(ids)} item(s).")
+    return _guarded_save(args, project, protect, "This change")
+
+
+def cmd_adopt(args) -> int:
+    project = _load(args)
+    ids = _targets(args, project, args.items)
+    print(_mode_tag(project))
+    protect = safety.protected_before(project, project.build())
+    result = adopt.adopt(project, args.kind, ids)
+    print(ui.green(f"{len(result.adopted)} item(s) now use kind {args.kind!r}."))
+    for i, fields in sorted(result.overrides.items()):
+        print(ui.yellow(f"  {i}: kept {', '.join(fields)} as override(s); the rule gives something else"))
+    for i, reason in sorted(result.skipped.items()):
+        print(ui.yellow(f"  {i}: not converted: {reason}"))
+    if result.learned:
+        print(f"Filled in {len(result.learned)} table value(s)" + (":" if args.verbose else " (-v lists them)."))
+        if args.verbose:
+            for line in result.learned:
+                print(ui.dim(f"  {line}"))
+    if result.side_effects:
+        print(ui.yellow(f"The new table values also change item(s) {', '.join(map(str, result.side_effects))}."))
+    if not result.adopted:
+        return 1
+    return _guarded_save(args, project, protect, "Adopting these items")
+
+
+def cmd_detach(args) -> int:
+    project = _load(args)
+    ids = _targets(args, project, args.items)
+    protect = safety.protected_before(project, project.build())
+    changed = adopt.detach(project, ids)
+    print(f"{len(changed)} item(s) are now plain definitions.")
+    return _guarded_save(args, project, protect, "Detaching these items")
+
+
+def cmd_schema(args) -> int:
+    project = _load(args)
+    action = args.schema_action or "show"
+    if action == "export":
+        text = jsonfmt.dumps(edits.export_schema(project))
+        if args.output:
+            with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            print(ui.green(f"Wrote {args.output}."))
+        else:
+            sys.stdout.write(text)
+        return 0
+    if action == "import":
+        with open(args.file, encoding="utf-8-sig") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ProjectError(f"{args.file}: invalid JSON at line {e.lineno}: {e.msg}")
+        protect = safety.protected_before(project, project.build())
+        for note in edits.import_schema(project, data):
+            print(note)
+        return _guarded_save(args, project, protect, "This schema change")
+    usage = {}
+    for rec in project.items:
+        if rec.get("kind"):
+            usage[rec["kind"]] = usage.get(rec["kind"], 0) + 1
+    if not project.tables and not project.kinds:
+        print("No tables or kinds yet. See `sisdefman schema import --help`, or use `sisdefman gui`.")
+    for name, table in project.tables.items():
+        print(ui.bold(f"table {name}") + f"  columns: {', '.join(table.get('columns', [])) or '-'}; "
+              f"{len(table.get('rows', {}))} row(s)")
+    for name, kind in project.kinds.items():
+        print(ui.bold(f"kind {name}") + f"  ({usage.get(name, 0)} item(s))")
+        for field, spec in derive.fields_of(kind).items():
+            extra = f" -> table {spec.get('table')}" if spec.get("type") == "ref" else ""
+            opt = ", optional" if spec.get("optional") else ""
+            print(f"    field {field}: {spec.get('type', 'text')}{extra}{opt}")
+        for field, rule in derive.rules_of(kind).items():
+            print(f"    {field} = {json.dumps(rule, ensure_ascii=False)}")
+    return 0
+
+
+def cmd_table(args) -> int:
+    project = _load(args)
+    action = args.table_action or "list"
+    if action == "list":
+        for name, table in project.tables.items():
+            print(f"{name}: {len(table.get('rows', {}))} row(s); columns {', '.join(table.get('columns', []))}")
+        if not project.tables:
+            print("No tables.")
+        return 0
+    if action == "show":
+        table = edits._table(project, args.name)
+        used = edits.rows_in_use(project, args.name)
+        columns = table["columns"]
+        rows = [["key"] + columns + ["items"]]
+        for key, row in table["rows"].items():
+            rows.append([key] + [_cell(row.get(c, "")) for c in columns] + [str(len(used.get(key, [])))])
+        widths = [max(len(r[n]) for r in rows) for n in range(len(rows[0]))]
+        for n, r in enumerate(rows):
+            line = "  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip()
+            print(ui.bold(line) if n == 0 else line)
+        return 0
+    protect = safety.protected_before(project, project.build())
+    if action == "new":
+        edits.create_table(project, args.name, args.columns)
+        print(f"Created table {args.name!r}.")
+    elif action == "set":
+        values = dict(query.parse_assignment(a) for a in args.values)
+        for note in edits.set_row(project, args.name, args.key, values):
+            print(ui.dim(f"  note: {note}"))
+        print(f"Saved row {args.key!r}.")
+    elif action == "delete":
+        edits.delete_row(project, args.name, args.key, force=args.force)
+        print(f"Deleted row {args.key!r}.")
+    elif action == "rename":
+        n = edits.rename_row(project, args.name, args.old, args.new)
+        print(f"Renamed {args.old!r} to {args.new!r}; updated {n} item(s).")
+    return _guarded_save(args, project, protect, "This table change")
+
+
+def cmd_gui(args) -> int:
+    from . import gui
+    return gui.serve(_project_path(args), host=args.host, port=args.port, open_browser=not args.no_browser)
+
+
 # ------------------------------------------------------------------ parser
 
 
@@ -583,11 +728,13 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--from", dest="from_file", metavar="FILE",
                      help="JSON file with the item (or a list of items) to add")
     src.add_argument("--like", type=int, metavar="ID", help="start from a copy of this definition")
-    p.add_argument("--set", action="append", metavar="FIELD=VALUE", help="set a text field (repeatable)")
-    p.add_argument("--set-json", action="append", metavar="FIELD=JSON",
-                   help="set a field to a JSON value such as true or 5 (repeatable)")
+    p.add_argument("assignments", nargs="*", metavar="FIELD=VALUE",
+                   help="fields of the new item; FIELD:=JSON for true, numbers, etc.")
+    p.add_argument("--kind", help="make it an item of this kind (its other fields are derived)")
+    p.add_argument("--set", action="append", metavar="FIELD=VALUE", help=argparse.SUPPRESS)
+    p.add_argument("--set-json", action="append", metavar="FIELD=JSON", help=argparse.SUPPRESS)
     guarded(p)
-    p.set_defaults(func=cmd_add)
+    p.set_defaults(func=cmd_add, extra_dest="assignments")
 
     p = command("remove", "Remove an item from its series.")
     p.add_argument("itemdefid", type=int)
@@ -640,6 +787,87 @@ def build_parser() -> argparse.ArgumentParser:
     p = command("mark-live", "Record the current definitions as what is live on Steam (after uploading).")
     p.set_defaults(func=cmd_mark_live)
 
+    p = command("query", "List item definitions that match conditions, like a database query.")
+    p.add_argument("-w", "--where", action="append", metavar="COND",
+                   help="e.g. rarity=epic, name~rifle, id>=200, flavor, !flavor (repeatable; all must match)")
+    p.add_argument("-f", "--fields", help=f"comma-separated fields to show (default: {','.join(DEFAULT_QUERY_FIELDS)})")
+    p.add_argument("--format", choices=("table", "json", "csv"), default="table")
+    p.add_argument("--dummies", action="store_true", help="include generated dummy items")
+    p.set_defaults(func=cmd_query)
+
+    p = command("set", "Change fields of items: kind fields, overrides of derived fields or Steam fields.")
+    p.add_argument("items", nargs="*", metavar="ID|FIELD=VALUE",
+                   help="itemdefids (110, 110-134) followed by FIELD=VALUE or FIELD:=JSON")
+    p.add_argument("-w", "--where", action="append", metavar="COND", help="select items by condition")
+    p.add_argument("--unset", action="append", metavar="FIELD",
+                   help="remove a stored value (for a derived field: go back to the rule)")
+    guarded(p)
+    p.set_defaults(func=cmd_set, extra_dest="items")
+
+    p = command("adopt", "Convert items to a kind, working out its fields from their current definitions.")
+    p.add_argument("kind")
+    p.add_argument("items", nargs="*", metavar="ID", help="itemdefids (110, 110-134)")
+    p.add_argument("-w", "--where", action="append", metavar="COND", help="select items by condition")
+    p.add_argument("-v", "--verbose", action="store_true", help="list the table values filled in")
+    guarded(p)
+    p.set_defaults(func=cmd_adopt, extra_dest="items")
+
+    p = command("detach", "Turn kind items back into plain definitions with their current fields.")
+    p.add_argument("items", nargs="*", metavar="ID")
+    p.add_argument("-w", "--where", action="append", metavar="COND")
+    guarded(p)
+    p.set_defaults(func=cmd_detach, extra_dest="items")
+
+    p = command("schema", "Show, export or import the lookup tables and item kinds.")
+    p.set_defaults(func=cmd_schema, schema_action=None)
+    ssub = p.add_subparsers(dest="schema_action", metavar="ACTION")
+    sp = ssub.add_parser("show", help="summarise tables and kinds", parents=[common])
+    sp.set_defaults(func=cmd_schema)
+    sp = ssub.add_parser("export", help="write tables and kinds as JSON", parents=[common])
+    sp.add_argument("-o", "--output", help="file to write (default: print)")
+    sp.set_defaults(func=cmd_schema)
+    sp = ssub.add_parser("import", help="merge tables and kinds from a JSON file", parents=[common])
+    sp.add_argument("file")
+    guarded(sp)
+    sp.set_defaults(func=cmd_schema)
+
+    p = command("table", "Show or edit lookup tables.")
+    p.set_defaults(func=cmd_table, table_action=None)
+    tsub = p.add_subparsers(dest="table_action", metavar="ACTION")
+    tsub.add_parser("list", help="list tables", parents=[common]).set_defaults(func=cmd_table)
+    sp = tsub.add_parser("show", help="show a table's rows", parents=[common])
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_table)
+    sp = tsub.add_parser("new", help="create a table", parents=[common])
+    sp.add_argument("name")
+    sp.add_argument("columns", nargs="*")
+    guarded(sp)
+    sp.set_defaults(func=cmd_table)
+    sp = tsub.add_parser("set", help="add or change a row: table set weapon rifle name=Rifle", parents=[common])
+    sp.add_argument("name")
+    sp.add_argument("key")
+    sp.add_argument("values", nargs="*", metavar="COLUMN=VALUE")
+    guarded(sp)
+    sp.set_defaults(func=cmd_table, extra_dest="values")
+    sp = tsub.add_parser("delete", help="delete a row", parents=[common])
+    sp.add_argument("name")
+    sp.add_argument("key")
+    sp.add_argument("--force", action="store_true", help="even if items use it")
+    guarded(sp)
+    sp.set_defaults(func=cmd_table)
+    sp = tsub.add_parser("rename", help="rename a row key and every reference to it", parents=[common])
+    sp.add_argument("name")
+    sp.add_argument("old")
+    sp.add_argument("new")
+    guarded(sp)
+    sp.set_defaults(func=cmd_table)
+
+    p = command("gui", "Open the graphical editor in your browser.")
+    p.add_argument("--port", type=int, default=0, help="port to listen on (default: any free port)")
+    p.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
+    p.add_argument("--no-browser", action="store_true", help="only print the address")
+    p.set_defaults(func=cmd_gui)
+
     p = command("diff", "Compare the export with the live baseline or with Steam item definition files.")
     p.add_argument("--against", action="append", metavar="FILE", help="compare with this file (repeatable)")
     p.add_argument("-v", "--verbose", action="store_true", help="show changed values")
@@ -650,7 +878,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        # argparse cannot take positionals after options (add crate1 --kind skin weapon=x);
+        # commands that accept FIELD=VALUE lists collect the leftovers.
+        dest = getattr(args, "extra_dest", None)
+        if dest and not any(e.startswith("-") for e in extra):
+            getattr(args, dest).extend(extra)
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
     if not getattr(args, "func", None):
         parser.print_help()
         return 2
@@ -662,3 +898,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         return 130
+    except BrokenPipeError:  # output piped into e.g. `head`
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
