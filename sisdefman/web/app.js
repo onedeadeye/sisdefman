@@ -796,9 +796,10 @@ function renderEditorPanel() {
     const exclude = new Set(["itemdefid", "kind", ...Object.keys(kind.fields || {}), ...Object.keys(kind.derive || {})]);
     body.push(h("div", { class: "section" }, h("h5", {}, "Other fields",
       h("span", { class: "hint", style: "text-transform:none;letter-spacing:0" }, "exported as they are")),
-    kvEditor(rec, exclude)));
+    kvEditor(rec, exclude), referenceHint(rec, e, kind)));
   } else {
-    body.push(h("div", { class: "section" }, h("h5", {}, "Steam fields"), kvEditor(rec, new Set(["itemdefid"]))));
+    body.push(h("div", { class: "section" }, h("h5", {}, "Steam fields"), kvEditor(rec, new Set(["itemdefid"])),
+      referenceHint(rec, e, null)));
   }
   body.push(h("div", { class: "section" }, h("h5", {}, "Exported definition"), refs.json), paletteList());
 
@@ -820,6 +821,37 @@ function renderEditorPanel() {
     h("div", { class: "head" }, refs.title, h("div", { class: "meta" }, meta)),
     h("div", { class: "scroll" }, body),
     h("div", { class: "actions" }, actions));
+}
+
+/* The lookup-table references this item can use in its fields, e.g.
+   {weapon.DisplayName} = "Handgun", from its weapon field or weapon: tag. */
+function referenceHint(rec, e, kind) {
+  const tagsOf = (tags) => Object.fromEntries(String(tags || "").split(";").map((t) => t.split(":"))
+    .filter((p) => p.length === 2).map(([c, v]) => [c.trim(), v.trim()]));
+  const tags = tagsOf(rec.tags ?? (e && e.item.tags));
+  const found = [];
+  for (const [name, t] of Object.entries(S.tables)) {
+    if (kind && (kind.fields || {})[name]) continue;  // a kind field: shown with the kind's fields
+    const own = typeof rec[name] === "string" && rec[name] !== "" ? rec[name] : null;
+    const value = own ?? tags[name];
+    if (value === undefined) continue;
+    const rows = t.rows || {};
+    const key = value in rows ? value : Object.keys(rows).find((k) => k.toLowerCase() === String(value).toLowerCase());
+    const columns = (t.columns || []).filter((c) => key !== undefined && rows[key][c] !== undefined && rows[key][c] !== "");
+    found.push({ name, value, key, own, columns, row: key !== undefined ? rows[key] : null });
+  }
+  if (!found.length) {
+    return Object.keys(S.tables).length ? h("div", { class: "hint ref-hint" },
+      `Fields can read lookup tables: {table.column} uses the row named by this item's field or tag of the same name (e.g. a ${Object.keys(S.tables)[0]}: tag).`) : null;
+  }
+  const copy = (text) => { try { navigator.clipboard.writeText(text); toast(`Copied ${text}`); } catch (err) { /* no clipboard */ } };
+  return h("div", { class: "hint ref-hint" }, "Fields can read lookup tables (click to copy):",
+    found.map((f) => h("div", { class: "ref-table" },
+      h("div", {}, h("b", {}, f.name), f.row
+        ? ` → row ${f.key} (from ${f.own !== null ? `its ${f.name} field` : `the tag ${f.name}:${f.value}`})`
+        : ` → no row ${JSON.stringify(f.value)} in this table (from ${f.own !== null ? `its ${f.name} field` : `the tag ${f.name}:${f.value}`})`),
+      f.row ? f.columns.slice(0, 6).map((c) => h("button", { class: "ref-chip", title: String(f.row[c]), onclick: () => copy(`{${f.name}.${c}}`) },
+        `{${f.name}.${c}}`, h("span", {}, ` = ${String(f.row[c]).slice(0, 32)}`))) : null)));
 }
 
 function renderPlacement(d) {
@@ -1332,7 +1364,7 @@ function renderTablesPage() {
 
   return h("div", { class: "page" },
     h("h2", {}, "Lookup tables"),
-    h("p", { class: "lead" }, "A table maps keys to values, e.g. the weapon pistol to the name \"Pistol\". A kind field of type ref holds a key; templates read the row's columns as {weapon.name}. Changing a value here changes every item that uses it. Renaming a key updates the items too."),
+    h("p", { class: "lead" }, "A table maps keys to values, e.g. the weapon pistol to the name \"Pistol\". Any item field can read a row's columns as {weapon.name}: the row is the one named by the item's weapon field or its weapon: tag (keys match ignoring case), or by a kind's ref field. Changing a value here changes every item that uses it. Renaming a key updates the items that name it in a field."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
         h("div", { class: "card" },

@@ -103,12 +103,24 @@ def item_views(project: Project, include_dummies: bool = False) -> List[dict]:
             view.setdefault(k, v)
         for k, v in (rec or {}).items():
             view.setdefault(k, v)
+        refs = {}  # name -> (table, key)
         for name, spec in derive.fields_of(schema.kind_of(rec or {})).items():
             if spec.get("type") == "ref" and (rec or {}).get(name) not in (None, ""):
-                table = schema.tables.get(spec.get("table")) or {}
-                row = (table.get("rows") or {}).get(str(rec[name])) or {}
-                for column in table.get("columns") or []:
-                    view.setdefault(f"{name}.{column}", row.get(column, ""))
+                refs[name] = (spec.get("table"), rec[name])
+        for table in schema.tables:  # a row picked by a field or tag of the same name
+            if table not in refs:
+                value = (rec or {}).get(table)
+                if not isinstance(value, (str, int)) or value == "":
+                    tagged = steam.tag_values(it, table)
+                    value = tagged[0] if tagged else None
+                if value is not None:
+                    refs[table] = (table, value)
+        for name, (table_name, key) in refs.items():
+            table = schema.tables.get(table_name) or {}
+            rows = table.get("rows") or {}
+            row = rows.get(derive.row_key(rows, key) or "") or {}
+            for column in table.get("columns") or []:
+                view.setdefault(f"{name}.{column}", row.get(column, ""))
         for cat, val in steam.parse_tags(it.get("tags")):
             key = f"tags.{cat}"
             if key in view:

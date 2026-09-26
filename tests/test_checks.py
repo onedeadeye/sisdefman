@@ -34,7 +34,7 @@ class VisibleTextTests(unittest.TestCase):
         rules["name"] = "{weapon} | {finish}"
         rules["display_type"] = "{series} skin"
         found = issues(self.project)
-        self.assertIn("warning: kind 'skin': the rule for name uses {weapon}, which is the row key of table "
+        self.assertIn("warning: kind 'skin': the rule for name uses {weapon}, which is a row key of table "
                       "'weapon' (such as 'pistol'); use a column such as {weapon.name} for text players read", found)
         self.assertIn("warning: kind 'skin': the rule for display_type uses {series}, the series' key; use "
                       "{series.name} for its display name", found)

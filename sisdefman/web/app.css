@@ -196,6 +196,12 @@ pre.json {
   border-bottom: 1px solid var(--border); background: none; cursor: pointer; text-align: left; }
 .list button:last-child { border-bottom: 0; }
 .list button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.ref-hint { margin-top: 8px; line-height: 1.9; }
+.ref-chip { font: 12px var(--mono, monospace); border: 1px solid var(--border); background: var(--panel); color: var(--accent);
+  border-radius: 4px; padding: 1px 6px; margin-right: 4px; cursor: pointer; }
+.ref-chip span { color: var(--muted); }
+.ref-table { margin-top: 4px; }
+.ref-table b { color: var(--text); }
 .list-row { display: flex; border-bottom: 1px solid var(--border); }
 .list-row button { border-bottom: 0; }
 .list-row button.grow { flex: 1; min-width: 0; }

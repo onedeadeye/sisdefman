@@ -223,7 +223,9 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
                 stored = records[i].get(name)
                 if not isinstance(stored, str) or not isinstance(rule, (str, list)):
                     continue
-                ctx = Context(schema, {"itemdefid": i, **values[i]}, positions.get(i), kind, strict=True)
+                # The item's other stored values (its tags, say) count as known.
+                known = {k: v for k, v in records[i].items() if k not in fields and k != "kind"}
+                ctx = Context(schema, {**known, "itemdefid": i, **values[i]}, positions.get(i), kind, strict=True)
                 for path, value in (invert(rule, stored, ctx) or {}).items():
                     changed |= learn(i, path, value)
 
@@ -237,14 +239,15 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
         rec = records[i]
         new = {"itemdefid": i, "kind": kind_name}
         new.update((f, values[i][f]) for f in fields if values[i].get(f) not in (None, ""))
-        trial, _ = derive.resolve(schema, new, positions.get(i))
+        extras = {k: copy.deepcopy(v) for k, v in rec.items()
+                  if k not in new and k not in rules and k not in fields and k != "kind"}
+        trial, _ = derive.resolve(schema, {**new, **extras}, positions.get(i))
+        shown, _ = derive.resolve(schema, rec, positions.get(i))  # stored values with references filled in
         for name in rules:
-            if name in rec and name not in fields and not same(rec[name], trial.get(name), name):
+            if name in rec and name not in fields and not same(shown.get(name), trial.get(name), name):
                 new[name] = copy.deepcopy(rec[name])
                 result.overrides.setdefault(i, []).append(name)
-        for key, value in rec.items():
-            if key not in new and key not in rules and key not in fields:
-                new[key] = copy.deepcopy(value)
+        new.update(extras)
         new_records[i] = new
 
     # Apply, then undo any item whose export would change.

@@ -12,6 +12,16 @@ import re
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 ITEM_TYPES = ("item", "bundle", "generator", "playtimegenerator", "tag_generator")
+# The usual order of fields in a definition; items of a kind are exported in
+# this order, followed by any other fields.
+FIELD_ORDER = ("itemdefid", "type", "exchange", "bundle", "name", "display_type", "description", "name_color",
+               "background_color", "icon_url", "icon_url_large", "tradable", "marketable", "promo", "tags",
+               "tag_generators")
+
+
+def in_field_order(item: dict) -> dict:
+    rank = {k: n for n, k in enumerate(FIELD_ORDER)}
+    return dict(sorted(item.items(), key=lambda kv: rank.get(kv[0], len(rank))))  # stable for the rest
 
 # Properties whose values contain itemdefid references.
 REFERENCE_FIELDS = ("bundle", "exchange", "tag_generators")

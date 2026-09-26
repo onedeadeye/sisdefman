@@ -76,14 +76,59 @@ def ref_fields(project: Project, table: str) -> Dict[str, List[str]]:
     return out
 
 
+def uses_table_directly(project: Project, rec: dict, table: str) -> bool:
+    """Whether an item reads ``table`` through a reference such as
+    {weapon.DisplayName} (in its stored values or its kind's rules) rather
+    than through a ref field."""
+    kind = project.schema().kind_of(rec)
+    if (derive.fields_of(kind).get(table) or {}).get("type") == "ref":
+        return False
+    texts = [v for k, v in rec.items() if k not in derive.STRUCTURAL_FIELDS]
+    for rule in derive.rules_of(kind).values():
+        texts.extend(rule if isinstance(rule, list) else [rule])
+    return any(table in derive.references_in(t) for t in texts)
+
+
+def direct_row(project: Project, rec: dict, table: str) -> Optional[str]:
+    """The value that picks an item's row of ``table`` for such references:
+    its field named after the table, or its tag."""
+    value = rec.get(table)
+    if isinstance(value, (str, int)) and value != "":
+        return str(value)
+    resolved = project.resolve(rec)[0] if project.schema().kind_of(rec) else rec
+    values = steam.tag_values(resolved, table)
+    return values[0] if values else None
+
+
 def rows_in_use(project: Project, table: str) -> Dict[str, List[int]]:
-    """Row key -> itemdefids referring to it."""
+    """Row key -> itemdefids referring to it (through a ref field, or a
+    reference such as {weapon.DisplayName} with the item's field or tag)."""
     fields = ref_fields(project, table)
+    rows = (project.tables.get(table) or {}).get("rows") or {}
     out: Dict[str, List[int]] = {}
     for rec in project.items:
         for field in fields.get(rec.get("kind"), []):
             if rec.get(field) not in (None, ""):
-                out.setdefault(str(rec[field]), []).append(rec["itemdefid"])
+                key = derive.row_key(rows, rec[field]) or str(rec[field])
+                out.setdefault(key, []).append(rec["itemdefid"])
+        if uses_table_directly(project, rec, table):
+            value = direct_row(project, rec, table)
+            key = derive.row_key(rows, value) if value is not None else None
+            if key is not None:
+                out.setdefault(key, []).append(rec["itemdefid"])
+    return out
+
+
+def _tag_users(project: Project, table: str, old: str, new: str) -> List[int]:
+    """Items that find row ``old`` by their tag and would lose it as ``new``."""
+    out = []
+    for rec in project.items:
+        if isinstance(rec.get(table), (str, int)) and rec.get(table) != "":
+            continue  # a field, which is renamed along
+        if uses_table_directly(project, rec, table):
+            value = direct_row(project, rec, table)
+            if value is not None and value.lower() == old.lower() and value.lower() != new.lower():
+                out.append(rec["itemdefid"])
     return out
 
 
@@ -131,6 +176,11 @@ def rename_row(project: Project, name: str, old: str, new: str) -> int:
         raise ProjectError(f"table {name!r} has no row {old!r}")
     if new in table["rows"]:
         raise ProjectError(f"table {name!r} already has a row {new!r}")
+    tagged = _tag_users(project, name, old, new)
+    if tagged:
+        raise ProjectError(f"item(s) {', '.join(map(str, tagged[:10]))} find row {old!r} by their {name}: tag, "
+                           f"which renaming the row would not change; rename it only in a way that still matches "
+                           f"(ignoring case), or change their tags first")
     table["rows"] = {(new if k == old else k): v for k, v in table["rows"].items()}
     fields = ref_fields(project, name)
     count = 0
@@ -139,7 +189,17 @@ def rename_row(project: Project, name: str, old: str, new: str) -> int:
             if rec.get(field) == old:
                 rec[field] = new
                 count += 1
+        if field_names_row(project, rec, name, old):
+            rec[name] = new
+            count += 1
     return count
+
+
+def field_names_row(project: Project, rec: dict, table: str, key: str) -> bool:
+    """Whether an item without a ref field for ``table`` names row ``key`` in
+    its own field called ``table``."""
+    return (not project.schema().kind_of(rec) or table not in derive.fields_of(project.schema().kind_of(rec))) \
+        and isinstance(rec.get(table), str) and rec[table] == key and uses_table_directly(project, rec, table)
 
 
 def replace_table(project: Project, name: str, table: dict, renames: Optional[Dict[str, str]] = None) -> None:
@@ -148,11 +208,21 @@ def replace_table(project: Project, name: str, table: dict, renames: Optional[Di
     if not isinstance(table.get("columns"), list) or not isinstance(table.get("rows"), dict):
         raise ProjectError("a table needs a columns list and a rows object")
     renames = {o: n for o, n in (renames or {}).items() if o != n}
+    for old, new in renames.items():
+        tagged = _tag_users(project, name, old, new)
+        if tagged:
+            raise ProjectError(f"item(s) {', '.join(map(str, tagged[:10]))} find row {old!r} by their {name}: tag, "
+                               "which renaming the row would not change; keep a key that still matches (ignoring "
+                               "case), or change their tags first")
     fields = ref_fields(project, name)
     for rec in project.items:
         for field in fields.get(rec.get("kind"), []):
             if rec.get(field) in renames:
                 rec[field] = renames[rec[field]]
+        for old, new in renames.items():
+            if field_names_row(project, rec, name, old):
+                rec[name] = new
+                break
     project.tables[name] = {"columns": list(table["columns"]),
                             "rows": {str(k): dict(v) for k, v in table["rows"].items()}}
 
@@ -162,6 +232,9 @@ def delete_table(project: Project, name: str) -> None:
     users = ref_fields(project, name)
     if users:
         raise ProjectError(f"table {name!r} is used by kind(s) {', '.join(users)}")
+    direct = [rec["itemdefid"] for rec in project.items if uses_table_directly(project, rec, name)]
+    if direct:
+        raise ProjectError(f"table {name!r} is used by item(s) {', '.join(map(str, direct[:10]))}")
     del project.tables[name]
 
 

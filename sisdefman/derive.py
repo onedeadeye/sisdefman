@@ -21,6 +21,15 @@ Templates use Python's format syntax: ``{field}``, ``{series.index:03d}``,
 derived field of the kind and any other value stored on the item.
 
 A value stored on an item for a derived field overrides the rule.
+
+Tables can also be used without a ``ref`` field: ``{weapon.DisplayName}``
+reads the row of table ``weapon`` named by the item's ``weapon`` field or,
+failing that, its ``weapon:`` tag. Row keys match ignoring case.
+
+Values stored on an item (every field of an item without a kind, and the
+overrides and extra fields of an item with one) may contain the same
+references. There only references to something known are filled in, so
+other text in braces (a crate's ``{contents}``) is left as it is.
 """
 
 from __future__ import annotations
@@ -40,6 +49,27 @@ SERIES_NAMES = ("series_name", "index", "count", "count_no_secret", "count_secre
 _FORMATTER = string.Formatter()
 _MISSING = object()
 _PATH = re.compile(r"^([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|\[[^\]]*\])*)$")
+# One reference in stored text: {name}, {weapon.DisplayName}, {tags[rarity]}, {series.index:03d}.
+_REFERENCE = re.compile(r"\{\{|\}\}|\{([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|\[[^\]{}]*\])*)(?:![rsa])?(?::[^{}]*)?\}")
+# Stored fields that are never templates.
+STRUCTURAL_FIELDS = ("itemdefid", "kind", "type", "bundle", "exchange", "tag_generators", "tags", "promo",
+                     "tag_generator_name", "tag_generator_values")
+
+
+def row_key(rows: Dict[str, dict], key) -> Optional[str]:
+    """The row key matching ``key``: exactly, or else ignoring case."""
+    key = str(key)
+    if key in rows:
+        return key
+    matches = [k for k in rows if k.lower() == key.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def references_in(text) -> List[str]:
+    """The names referred to in stored text (``weapon`` for {weapon.DisplayName})."""
+    if not isinstance(text, str) or "{" not in text:
+        return []
+    return [m.group(1) for m in _REFERENCE.finditer(text) if m.group(1)]
 
 
 class SeriesInfo(NamedTuple):
@@ -226,18 +256,70 @@ class Context:
             raw = stored
         elif name in rules:
             raw = self.derived(name)
+        elif name in self.schema.tables:
+            raw = self.tag(name)
+            if raw == "":
+                self.problem(f"{{{name}}}: this item has no {name} field or {name}: tag to choose a row of "
+                             f"table {name!r}")
+                return ""
         else:
             self.problem(f"unknown field {{{name}}}")
             return ""
         return self.wrap(name, raw)
 
+    def tag(self, category: str) -> str:
+        """The value of one of the item's tags (stored, or derived by its kind)."""
+        raw = self.values.get("tags")
+        if raw is None and "tags" in rules_of(self.kind) and "tags" not in self._resolving:
+            raw = self.derived("tags")
+        return TagsValue(raw)[category]
+
     def wrap(self, name: str, raw):
-        spec = fields_of(self.kind).get(name) or {}
-        if spec.get("type") == "ref" and raw not in (None, ""):
-            return RefValue(raw, spec.get("table", ""), self)
+        spec = fields_of(self.kind).get(name)
+        if spec is not None:
+            if spec.get("type") == "ref" and raw not in (None, ""):
+                return RefValue(raw, spec.get("table", ""), self)
+        elif name in self.schema.tables and isinstance(raw, (str, int)) and raw not in ("",):
+            return RefValue(raw, name, self)
         if name == "tags":
             return TagsValue(raw)
         return raw
+
+    def knows(self, name: str) -> bool:
+        """Whether a reference in stored text is to something this item has."""
+        if name in ("itemdefid", "tags"):
+            return True
+        if name == "series" or name in SERIES_NAMES:
+            return self.series is not None
+        return (name in self.schema.tables or name in fields_of(self.kind) or name in rules_of(self.kind)
+                or name in self.values)
+
+    def render_stored(self, text: str, label: str) -> str:
+        """Fill in the references to known things in a stored value; leave
+        other text in braces, and references that fail, as they are."""
+        if not isinstance(text, str) or "{" not in text:
+            return text
+
+        def fill(m):
+            if not m.group(1) or not self.knows(m.group(1)):
+                return m.group(0)
+            saved, self.problems = self.problems, []
+            try:
+                value = m.group(0).format_map(self)
+            except Unknown:
+                raise
+            except (KeyError, ValueError, IndexError, AttributeError, TypeError) as e:
+                if not self.problems:  # otherwise it only follows from the problem already found
+                    self.problems.append(_explain(e))
+            finally:
+                found, self.problems = self.problems, saved
+            if found:
+                for problem in found:
+                    self.problem(f"{label}: {problem}")
+                return m.group(0)
+            return value
+
+        return _REFERENCE.sub(fill, text)
 
     def column(self, table: str, key, column: str):
         t = self.schema.tables.get(table)
@@ -247,10 +329,12 @@ class Context:
         if column not in (t.get("columns") or []):
             self.problem(f"table {table!r} has no column {column!r}")
             return ""
-        row = (t.get("rows") or {}).get(str(key))
-        if row is None:
+        rows = t.get("rows") or {}
+        found = row_key(rows, key)
+        if found is None:
             self.problem(f"{key!r} is not a row of table {table!r}")
             return ""
+        row = rows[found]
         value = row.get(column)
         if value in (None, ""):
             self.problem(f"table {table!r}: row {key!r} has no {column}")
@@ -308,16 +392,24 @@ def resolve(schema: Schema, record: dict, series: Optional[SeriesInfo] = None) -
         if "kind" in out:
             problems.append(f"unknown kind {out['kind']!r}")
             out.pop("kind")
-        return out, problems
+        ctx = Context(schema, record, series, None)
+        for key, value in out.items():
+            if key not in STRUCTURAL_FIELDS:
+                out[key] = ctx.render_stored(value, key)
+        return out, problems + ctx.problems
 
     ctx = Context(schema, record, series, kind)
     fields = fields_of(kind)
     out = {"itemdefid": record["itemdefid"]}
     for field in rules_of(kind):
-        out[field] = copy.deepcopy(record[field]) if field in record else ctx.derived(field)
+        if field in record:
+            value = copy.deepcopy(record[field])
+            out[field] = value if field in STRUCTURAL_FIELDS else ctx.render_stored(value, field)
+        else:
+            out[field] = ctx.derived(field)
     for key, value in record.items():
         if key not in out and key != "kind" and key not in fields:
-            out[key] = copy.deepcopy(value)
+            out[key] = copy.deepcopy(value) if key in STRUCTURAL_FIELDS else ctx.render_stored(value, key)
 
     for name, spec in fields.items():
         value = record.get(name)
@@ -326,13 +418,13 @@ def resolve(schema: Schema, record: dict, series: Optional[SeriesInfo] = None) -
                 ctx.problem(f"{name} is empty")
             continue
         kind_type = spec.get("type", "text")
-        if kind_type == "ref" and str(value) not in schema.rows(spec.get("table", "")):
+        if kind_type == "ref" and row_key(schema.rows(spec.get("table", "")), value) is None:
             ctx.problem(f"{name}: {value!r} is not a row of table {spec.get('table')!r}")
         elif kind_type == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
             ctx.problem(f"{name} should be a number")
         elif kind_type == "bool" and not isinstance(value, bool):
             ctx.problem(f"{name} should be true or false")
-    return out, ctx.problems
+    return steam.in_field_order(out), ctx.problems
 
 
 def overridden(schema: Schema, record: dict) -> List[str]:

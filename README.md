@@ -172,13 +172,15 @@ every skin of that weapon follows.
     are joined with a blank line.
   - Any other JSON value (`true`, a number), which is exported as it is.
 
-  Rules are exported in the order they are listed.
+  Items of a kind are exported with their fields in the usual Steam order (`itemdefid`,
+  `type`, `exchange`, `bundle`, `name`, `display_type`, `description`, colours, icons,
+  `tradable`, `marketable`, `promo`, `tags`, `tag_generators`), then any others.
 - **Templates** use Python's format syntax:
 
   | Syntax | Gives |
   | --- | --- |
   | `{field}` | a field's value |
-  | `{weapon.name}` | a column of the table row that a `ref` field points to |
+  | `{weapon.name}` | a column of the table row that a `ref` field points to, or else the row named by the item's `weapon:` tag (see [Using a table in any item](#using-a-table-in-any-item)) |
   | `{series}`, `{series.name}`, `{series.index}`, `{series.count}` | the item's series key, display name, position and size |
   | `{series.count_no_secret}`, `{series.count_secret}` | the series' size without secret rares, and its number of secret rares (see [Secret rares](#secret-rares-and-item-counts)) |
   | `{itemdefid}` | the item's ID |
@@ -265,12 +267,49 @@ sisdefman table import weapon weapons.csv --skip ActorClass \
 
 The imported columns can then be used like any other:
 
-- in templates (`{weapon.Description}`);
+- in any item's fields and in templates (`{weapon.Description}`, see below);
 - in queries (`sisdefman query -w weapon.Range=LONG -f id,name,weapon.DisplayName`);
 - in the GUI, which shows a weapon's row under the weapon field.
 
 In the GUI, use **Lookup tables → Import CSV…**. Columns that look like class references
 start unticked there.
+
+### Using a table in any item
+
+An item's fields can read a table directly, without a kind. With a table called `weapon`,
+`{weapon.DisplayName}` means "the `DisplayName` of this item's weapon". The row is the one
+named by:
+
+1. the item's own `weapon` field, if it has one (`"weapon": "Pistol"`);
+2. otherwise its `weapon:` tag (`weapon:pistol`).
+
+Keys match ignoring case, so the tag `weapon:pistol` finds the CSV row `Pistol`.
+
+```sh
+sisdefman set 110 "name={weapon.DisplayName} | Red"
+sisdefman set 110 "icon_url=https://example.com/{weapon}_{mat_id}_small.png"
+sisdefman show 110          # "name": "Handgun | Red", "icon_url": ".../pistol_red_small.png"
+```
+
+- **References.** `{weapon}` alone is the value the row was chosen by (`pistol`). Other
+  fields of the item (`{mat_id}`), `{itemdefid}`, `{tags[rarity]}` and, for series items,
+  `{series.name}` and `{series.index}` work too.
+- **Where.** References work in every field except the structural ones (`type`, `bundle`,
+  `exchange`, `tags`, `tag_generators`, `promo`). Text in braces that isn't a known reference
+  is left as it is, so a crate's `{contents}` still works.
+- **In the GUI.** The item editor lists the references the item can use, with their values
+  (click one to copy it), and the preview shows the result as you type.
+- **Mistakes.** A reference that can't be filled in (no `weapon` field or tag, no such row
+  or column) stays visible in the export, and `check` warns about it. `check` also warns when
+  `{weapon}` (a key) is used in a name or description, where `{weapon.DisplayName}` was
+  probably meant.
+- **Renaming a row.** A row found by a field is renamed along with that field. A row found by
+  a tag can only be renamed in a way that still matches the tag (ignoring case), because
+  renaming it doesn't change the items' tags.
+
+For many similar items, a kind saves writing the reference into each one: a kind whose rule is
+`"name": "{weapon.DisplayName} | {finish}"` reads the weapon from each item's tag too, and
+**Convert** (`sisdefman adopt`) works out each item's `finish` from its current name.
 
 ## Colours
 
@@ -334,7 +373,8 @@ sisdefman schema export -o schema.json
 - **What conditions can test:**
   - the exported fields;
   - a kind's fields;
-  - a column of the table row that a `ref` field points to (`weapon.Range`);
+  - a column of the table row that a `ref` field, or a field or tag named after the table,
+    points to (`weapon.Range`);
   - one tag (`tags.rarity`);
   - `id`, `kind`, `series`, `index` and `dummy`.
 - **Values:** `FIELD=TEXT` stores text; `FIELD:=JSON` stores `true`, `5`, etc.

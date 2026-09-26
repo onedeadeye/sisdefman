@@ -308,25 +308,45 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
                     add("warning", f"kind {kname!r}: the rule for {field} uses {{series}}, the series' key; use "
                                    "{series.name} for its display name")
                 elif isinstance(spec, dict) and spec.get("type") == "ref":
-                    table = project.tables.get(spec.get("table")) or {}
-                    keys = [k for k in (table.get("rows") or {}) if _IDENTIFIER.match(k)]
-                    columns = table.get("columns") or []
-                    if keys and columns:
-                        add("warning", f"kind {kname!r}: the rule for {field} uses {{{head}}}, which is the row key "
-                                       f"of table {spec.get('table')!r} (such as {keys[0]!r}); use a column such as "
-                                       f"{{{head}.{columns[0]}}} for text players read")
+                    _bare_key(project, head, spec.get("table"), f"kind {kname!r}: the rule for {field}", add)
+                elif spec is None and head in project.tables and head not in derive.rules_of(kind):
+                    _bare_key(project, head, head, f"kind {kname!r}: the rule for {field}", add)
+    for rec in project.items:
+        kind = project.schema().kind_of(rec)
+        kind_fields = derive.fields_of(kind)
+        for field, value in rec.items():
+            if field in kind_fields or not is_visible_field(field):
+                continue
+            for m in re.finditer(r"\{([A-Za-z_]\w*)(?:![rsa])?(?::[^{}]*)?\}", value if isinstance(value, str) else ""):
+                head = m.group(1)
+                if head in project.tables and not kind_fields.get(head):
+                    _bare_key(project, head, head, f"{field}", add, rec["itemdefid"])
+                elif head == "series" and project.series_for_id(rec["itemdefid"]):
+                    add("warning", f"{field} uses {{series}}, the series' key; use {{series.name}} for its display "
+                                   "name", rec["itemdefid"])
     for it in built:
         for field, value in it.items():
             if not isinstance(value, str) or not is_visible_field(field):
                 continue
             for token in dict.fromkeys(_PLACEHOLDER.findall(value)):
-                if token not in LISTING_TOKENS:  # reported above
+                head = re.match(r"\{([A-Za-z_]\w*)", token).group(1)
+                # Listing tokens and table references that failed are reported above.
+                if token not in LISTING_TOKENS and head not in project.tables:
                     add("warning", f"{field} contains {token}, which is not filled in here, so players would "
                                    "see it as it is", it["itemdefid"])
             for kw in dict.fromkeys(re.findall(r"(?<![\w@])@([A-Za-z_][\w-]*)", value)):
                 if kw in project.colors:
                     add("warning", f"{field} shows the colour keyword @{kw} as text; keywords only work in "
                                    "colour fields", it["itemdefid"])
+
+
+def _bare_key(project: Project, head: str, table_name: str, where: str, add, itemdefid=None) -> None:
+    table = project.tables.get(table_name) or {}
+    keys = [k for k in (table.get("rows") or {}) if _IDENTIFIER.match(k.lower())]
+    columns = table.get("columns") or []
+    if keys and columns:
+        add("warning", f"{where} uses {{{head}}}, which is a row key of table {table_name!r} (such as {keys[0]!r}); "
+                       f"use a column such as {{{head}.{columns[0]}}} for text players read", itemdefid)
 
 
 def _ranges(ids: List[int]) -> str:
