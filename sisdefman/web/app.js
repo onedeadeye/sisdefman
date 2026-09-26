@@ -235,10 +235,41 @@ function promptModal(title, fields, okLabel) {
 
 /* ------------------------------------------------------------ shell */
 
+/* The panels that scroll, and what each shows: a panel keeps its scroll
+   position across a redraw while it shows the same thing (the item list for
+   the same scope and search, the editor for the same item...). */
+function scrollKeys() {
+  return [
+    [".sidebar", "sidebar"],
+    [".gridwrap", `grid|${ui.scope.type}|${ui.scope.value ?? ""}|${ui.search}`],
+    [".editor .scroll", `editor|${ui.selected}`],
+    [".page", `page|${ui.page}|${ui.kindSel ?? ""}|${ui.tableSel ?? ""}|${ui.seriesSel ?? ""}`],
+  ];
+}
+
 function render() {
   const app = document.getElementById("app");
+  const saved = {};
+  for (const [sel] of scrollKeys()) {
+    const el = app.querySelector(sel);
+    if (el && el.dataset.scrollKey) saved[sel] = { key: el.dataset.scrollKey, top: el.scrollTop, left: el.scrollLeft };
+  }
   if (!S.open) { app.replaceChildren(renderLauncher()); return; }
   app.replaceChildren(h("div", { class: "shell" }, renderTopbar(), h("div", { class: "body" }, renderSidebar(), renderPage())));
+  for (const [sel, key] of scrollKeys()) {
+    const el = app.querySelector(sel);
+    if (!el) continue;
+    el.dataset.scrollKey = key;
+    const was = saved[sel];
+    if (was && was.key === key) {
+      el.scrollTop = was.top;
+      el.scrollLeft = was.left;
+    } else if (sel === ".gridwrap" && ui.selected !== null) {
+      // Arriving at a list (e.g. from a link on the Check page): show the chosen item.
+      const row = el.querySelector("tr.selected");
+      if (row) row.scrollIntoView({ block: "center" });
+    }
+  }
 }
 
 function renderTopbar() {
