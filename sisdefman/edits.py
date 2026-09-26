@@ -238,11 +238,12 @@ def rename_column(project: Project, table: str, old: str, new: str) -> int:
     for kind in project.kinds.values():
         heads.update(f for f, spec in derive.fields_of(kind).items()
                      if isinstance(spec, dict) and spec.get("type") == "ref" and spec.get("table") == table)
-    pattern = re.compile(r"\{(" + "|".join(map(re.escape, sorted(heads))) + r")\." + re.escape(old) + r"(?=[}\[.:!])")
+    pattern = re.compile(r"\{(" + "|".join(map(re.escape, sorted(heads))) + r")(\[[^\]{}]*\])?\." + re.escape(old)
+                         + r"(?=[}\[.:!])")
 
     def fix(value):
         if isinstance(value, str):
-            return pattern.sub(lambda m: "{" + m.group(1) + "." + new, value)
+            return pattern.sub(lambda m: "{" + m.group(1) + (m.group(2) or "") + "." + new, value)
         if isinstance(value, list):
             return [fix(v) for v in value]
         return value

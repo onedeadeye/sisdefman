@@ -190,6 +190,7 @@ every skin of that weapon follows.
   | --- | --- |
   | `{field}` | a field's value |
   | `{weapon.name}` | a column of the table row that a `ref` field points to, or else the row named by the item's `weapon:` tag (see [Using a table in any item](#using-a-table-in-any-item)) |
+  | `{epicflavor[mat_id].text}` | a column of the row that another value names (here the item's `mat_id`); empty when the table has no such row |
   | `{series}`, `{series.name}`, `{series.index}`, `{series.count}` | the item's series key, display name, position and size |
   | `{series.count_no_secret}`, `{series.count_secret}` | the series' size without secret rares, and its number of secret rares (see [Secret rares](#secret-rares-and-item-counts)) |
   | `{itemdefid}` | the item's ID |
@@ -308,6 +309,17 @@ sisdefman show 110          # "name": "Handgun | Red", "icon_url": ".../pistol_r
   is left as it is, so a crate's `{contents}` still works.
 - **In the GUI.** The item editor lists the references the item can use, with their values
   (click one to copy it), and the preview shows the result as you type.
+- **Choosing the row by another value.** Brackets name the row: `{epicflavor[mat_id].text}` is
+  the `text` of the `epicflavor` row named by the item's `mat_id`. In quotes, the key is taken
+  as written: `{rarity["epic"].name}`. When the table has no row for the value, the lookup is
+  simply empty, without a warning, so a table can cover only some items. For example, flavor
+  text for epic materials only:
+
+  ```json
+  "description": ["Applies the {finish} appearance to the {weapon.name}.", "{epicflavor[mat_id].text}"]
+  ```
+
+  Items whose material has no row in `epicflavor` get no second paragraph.
 - **Mistakes.** A reference that can't be filled in (no `weapon` field or tag, no such row
   or column) stays visible in the export, and `check` warns about it. `check` also warns when
   `{weapon}` (a key) is used in a name or description, where `{weapon.DisplayName}` was

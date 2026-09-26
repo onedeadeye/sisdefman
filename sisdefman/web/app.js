@@ -898,7 +898,7 @@ function referenceHint(rec, e, kind) {
       `Fields can read lookup tables: {table.column} uses the row named by this item's field or tag of the same name (e.g. a ${Object.keys(S.tables)[0]}: tag).`) : null;
   }
   const copy = (text) => { try { navigator.clipboard.writeText(text); toast(`Copied ${text}`); } catch (err) { /* no clipboard */ } };
-  return h("div", { class: "hint ref-hint" }, "Fields can use these values (click to copy):",
+  return h("div", { class: "hint ref-hint" }, "Fields can use these values (click to copy); another value can choose the row with {table[field].column}:",
     found.map((f) => h("div", { class: "ref-table" },
       h("div", {}, h("b", {}, f.name), f.series ? ` → its place in series ${f.key}` : f.row
         ? ` → row ${f.key} (from ${f.own !== null ? `its ${f.name} field` : `the tag ${f.name}:${f.value}`})`
@@ -1349,7 +1349,9 @@ function renderKindsPage() {
           h("button", { class: "btn small", onclick: () => { d.rules.push({ field: "", mode: "template", text: "", paragraphs: [""], json: "" }); again(); } }, "+ Derived field"),
           h("div", { class: "help", style: "margin-top:12px" },
             h("b", {}, "Templates. "), "Write ", h("code", {}, "{field}"), " to insert a field, ", h("code", {}, "{weapon.name}"),
-            " for a column of the lookup-table row a ref field points to, ", h("code", {}, "{series}"), ", ",
+            " for a column of the lookup-table row a ref field (or the item's weapon: tag) points to, ",
+            h("code", {}, "{epicflavor[mat_id].text}"), " for the row another value names (empty if there is none), ",
+            h("code", {}, "{series}"), ", ",
             h("code", {}, "{series.name}"), ", ", h("code", {}, "{series.index}"), ", ", h("code", {}, "{series.count}"),
             " / ", h("code", {}, "{series.count_no_secret}"), " / ", h("code", {}, "{series.count_secret}"), ", ", h("code", {}, "{itemdefid}"),
             ", or another derived field such as ", h("code", {}, "{name}"), ". ", h("code", {}, "{series.index:03d}"),

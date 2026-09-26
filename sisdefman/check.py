@@ -295,6 +295,10 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
                     head, rest = derive.split_path(path)
                 except ValueError:
                     continue
+                if rest and rest[-1].startswith("[") and head in project.tables | {
+                        f for f, s in fields.items() if isinstance(s, dict) and s.get("type") == "ref"}:
+                    _row_without_column(project, path, head, fields, f"kind {kname!r}: the rule for {field}", add)
+                    continue
                 if rest:
                     continue
                 spec = fields.get(head)
@@ -311,6 +315,10 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
         for field, value in rec.items():
             if field in kind_fields or not is_visible_field(field):
                 continue
+            for m in re.finditer(r"\{([A-Za-z_]\w*)(\[[^\]{}]*\])\}", value if isinstance(value, str) else ""):
+                if m.group(1) in project.tables:
+                    _row_without_column(project, m.group(1) + m.group(2), m.group(1), kind_fields, field, add,
+                                        rec["itemdefid"])
             for m in re.finditer(r"\{([A-Za-z_]\w*)(?:![rsa])?(?::[^{}]*)?\}", value if isinstance(value, str) else ""):
                 head = m.group(1)
                 if head in project.tables and not kind_fields.get(head):
@@ -332,6 +340,15 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
                 if kw in project.colors:
                     add("warning", f"{field} shows the colour keyword @{kw} as text; keywords only work in "
                                    "colour fields", it["itemdefid"])
+
+
+def _row_without_column(project: Project, path: str, head: str, fields: dict, where: str, add,
+                        itemdefid=None) -> None:
+    spec = fields.get(head)
+    table_name = spec.get("table") if isinstance(spec, dict) and spec.get("type") == "ref" else head
+    columns = (project.tables.get(table_name) or {}).get("columns") or ["column"]
+    add("warning", f"{where} uses {{{path}}}, which is only the row's key; add the column to show, such as "
+                   f"{{{path}.{columns[0]}}}", itemdefid)
 
 
 def _bare_key(project: Project, head: str, table_name: str, where: str, add, itemdefid=None) -> None:

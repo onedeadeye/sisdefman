@@ -65,7 +65,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(self.built(999999)["name"], "{weapon.name} drops")
         found = self.issues()
         self.assertIn("warning: [999999] name: {weapon}: this item has no weapon field or weapon: tag to choose a "
-                      "row of table 'weapon'", found)
+                      "row of table 'weapon' (to choose one by another value, write {weapon[field].column})", found)
         self.assertIn("warning: [110] name: table 'weapon' has no column 'Nope'", found)
         self.assertIn("warning: [115] name: table 'weapon': row 'shotgun' has no Range", found)
         self.assertEqual(self.built(116)["name"], "SHORT | Flames")
@@ -116,6 +116,40 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(self.built(111)["name"], "Long Rifle | Blue")
         with self.assertRaises(ProjectError):
             edits.delete_table(self.project, "weapon")
+
+    def test_brackets_choose_the_row_by_another_value(self):
+        self.project.tables["epicflavor"] = {"columns": ["text"], "rows": {
+            "flames": {"text": "Still warm."}, "sparks": {"text": "Handle with care."}}}
+        self.project.kinds["skin"] = {"fields": {"finish": {"type": "text"}, "mat_id": {"type": "text"}}, "derive": {
+            "type": "item", "name": "{weapon.name} | {finish}",
+            "description": ["Applies the {finish} appearance.", "{epicflavor[mat_id].text}"]}}
+        recs = self.project.items
+        for i, finish in ((115, "Cracks"), (116, "Flames"), (117, "Sparks")):
+            recs[[r["itemdefid"] for r in recs].index(i)] = {
+                "itemdefid": i, "kind": "skin", "finish": finish, "mat_id": finish.lower(),
+                "tags": f"series:crate1;weapon:{'shotgun' if i == 115 else 'pistol' if i == 116 else 'rifle'}"}
+        self.assertEqual(self.built(116)["description"], "Applies the Flames appearance.\n\nStill warm.")
+        # No row for "cracks": the paragraph is simply left out, without a warning.
+        self.assertEqual(self.built(115)["description"], "Applies the Cracks appearance.")
+        self.assertEqual([i for i in self.issues() if "[115]" in i], [])
+        # In an item's own fields, with a quoted key, and through a path.
+        self.project.item(999999)["description"] = ('{epicflavor["sparks"].text} {weapon["rifle"].name} '
+                                                   '{weapon[type].name}.')
+        self.project.item(999999)["type"] = "playtimegenerator"
+        self.assertEqual(self.built(999999)["description"], "Handle with care. Long Rifle .")
+        # Mistakes in the definition are still reported.
+        self.project.kinds["skin"]["derive"]["name"] = "{epicflavor[mat_id].txt}"
+        self.project.item(110)["name"] = "{epicflavor[type]}"
+        found = self.issues()
+        self.assertIn("warning: [116] table 'epicflavor' has no column 'txt'", found)
+        self.assertIn("warning: [110] name uses {epicflavor[type]}, which is only the row's key; add the column "
+                      "to show, such as {epicflavor[type].text}", found)
+
+    def test_renaming_a_column_follows_into_lookups(self):
+        self.project.tables["epicflavor"] = {"columns": ["text"], "rows": {"flames": {"text": "Warm."}}}
+        self.project.item(116).update(description="{epicflavor[mat_id].text}", mat_id="flames")
+        self.assertEqual(edits.rename_column(self.project, "epicflavor", "text", "flavor"), 1)
+        self.assertEqual(self.project.item(116)["description"], "{epicflavor[mat_id].flavor}")
 
     def test_queries_can_use_the_row(self):
         rows = query.select(self.project, ["weapon.Range=LONG"])

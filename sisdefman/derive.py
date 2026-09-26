@@ -28,6 +28,12 @@ Tables can also be used without a ``ref`` field: ``{weapon.DisplayName}``
 reads the row of table ``weapon`` named by the item's ``weapon`` field or,
 failing that, its ``weapon:`` tag. Row keys match ignoring case.
 
+Brackets choose the row by another value: ``{epicflavor[mat_id].text}`` is
+the ``text`` of the row of ``epicflavor`` named by the item's ``mat_id``
+(``{rarity["epic"].name}`` names a row directly). Such a lookup is empty,
+without a warning, when the table has no row for the value, so a paragraph
+using it is left out for those items.
+
 Values stored on an item (every field of an item without a kind, and the
 overrides and extra fields of an item with one) may contain the same
 references. There only references to something known are filled in, so
@@ -91,25 +97,33 @@ class Unknown(Exception):
 
 
 class RefValue:
-    """A key of a lookup table; its columns are attributes."""
+    """A row of a lookup table: its key, with the columns as attributes.
+    ``[value]`` chooses another row (see the module docstring). ``key`` is
+    None when the item names no row of the table."""
 
-    __slots__ = ("key", "table", "_ctx")
+    __slots__ = ("key", "table", "_ctx", "lookup")
 
-    def __init__(self, key, table: str, ctx: "Context"):
+    def __init__(self, key, table: str, ctx: "Context", lookup: bool = False):
         self.key = key
         self.table = table
         self._ctx = ctx
+        self.lookup = lookup  # chosen with [...]: a missing row is simply empty
 
     def __str__(self) -> str:
-        return str(self.key)
+        return self._ctx.no_row(self.table) if self.key is None else str(self.key)
 
     def __format__(self, spec: str) -> str:
-        return format(str(self.key), spec)
+        return format(str(self), spec)
 
     def __getattr__(self, column: str):
         if column.startswith("_"):
             raise AttributeError(column)
-        return self._ctx.column(self.table, self.key, column)
+        if self.key is None:
+            return self._ctx.no_row(self.table)
+        return self._ctx.column(self.table, self.key, column, missing_ok=self.lookup)
+
+    def __getitem__(self, name: str) -> "RefValue":
+        return RefValue(self._ctx.lookup_key(name), self.table, self._ctx, lookup=True)
 
 
 class SeriesValue:
@@ -261,9 +275,7 @@ class Context:
         elif name in self.schema.tables:
             raw = self.tag(name)
             if raw == "":
-                self.problem(f"{{{name}}}: this item has no {name} field or {name}: tag to choose a row of "
-                             f"table {name!r}")
-                return ""
+                return RefValue(None, name, self)  # a row can still be chosen with [...]
         else:
             self.problem(f"unknown field {{{name}}}")
             return ""
@@ -323,7 +335,27 @@ class Context:
 
         return _REFERENCE.sub(fill, text)
 
-    def column(self, table: str, key, column: str):
+    def no_row(self, table: str) -> str:
+        self.problem(f"{{{table}}}: this item has no {table} field or {table}: tag to choose a row of table "
+                     f"{table!r} (to choose one by another value, write {{{table}[field].column}})")
+        return ""
+
+    def lookup_key(self, name: str) -> str:
+        """The row key in ``[name]``: a quoted literal, or else the value of
+        ``name`` (a field, or a path such as ``weapon.name``)."""
+        name = name.strip()
+        if len(name) >= 2 and name[0] == name[-1] and name[0] in "'\"":
+            return name[1:-1]
+        try:
+            value, _ = _FORMATTER.get_field(name, (), self)
+        except Unknown:
+            raise
+        except (KeyError, AttributeError, ValueError, IndexError, TypeError) as e:
+            self.problem(f"[{name}]: {_explain(e)}")
+            return ""
+        return str(value)
+
+    def column(self, table: str, key, column: str, missing_ok: bool = False):
         t = self.schema.tables.get(table)
         if t is None:
             self.problem(f"there is no table {table!r}")
@@ -334,7 +366,8 @@ class Context:
         rows = t.get("rows") or {}
         found = row_key(rows, key)
         if found is None:
-            self.problem(f"{key!r} is not a row of table {table!r}")
+            if not missing_ok:
+                self.problem(f"{key!r} is not a row of table {table!r}")
             return ""
         row = rows[found]
         value = row.get(column)
