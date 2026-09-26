@@ -263,3 +263,36 @@ table.edit.wide input { min-width: 120px; }
 .ref-info details { width: 100%; }
 .ref-info summary { cursor: pointer; }
 .ref-info summary > span { margin-right: 12px; }
+
+/* ------------------------------------------------------------ project chooser */
+.file-switch { border: 0; background: none; cursor: pointer; padding: 3px 6px; border-radius: var(--radius);
+  display: inline-flex; align-items: center; min-width: 0; }
+.file-switch:hover { background: var(--row-hover); }
+.launcher { min-height: 100vh; }
+.launcher .topbar { height: 48px; }
+.launcher-body { max-width: 860px; margin: 0 auto; padding: 26px 20px 40px; }
+.launcher-body h2 { margin: 0 0 4px; font-size: 20px; }
+.recent-list { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.recent { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); padding-right: 8px; }
+.recent:last-child { border-bottom: 0; }
+.recent-open { flex: 1; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px;
+  align-items: baseline; text-align: left; border: 0; background: none; cursor: pointer; padding: 9px 12px; }
+.recent-open > span:last-child { white-space: nowrap; }
+.recent-open:hover:not(:disabled) { background: var(--row-hover); }
+.recent-open .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent.missing { opacity: 0.6; }
+.recent.missing .recent-open { cursor: default; }
+.files { border: 1px solid var(--border); border-radius: var(--radius); max-height: 360px; overflow-y: auto; }
+.file-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px; border: 0;
+  border-bottom: 1px solid var(--border); background: none; text-align: left; cursor: pointer; }
+.file-row:last-child { border-bottom: 0; }
+.file-row:hover { background: var(--row-hover); }
+.file-row .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row.project { background: var(--accent-soft); cursor: default; }
+.ftype { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); width: 52px; flex: none; }
+.ftype.dir { color: var(--text); }
+.ftype.project { color: var(--accent); font-weight: 700; }
+.new-project { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+@media (max-width: 720px) {
+  .recent-open { grid-template-columns: 1fr; gap: 2px; }
+}

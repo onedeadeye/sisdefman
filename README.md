@@ -44,7 +44,34 @@ control, ideally) and `itemdefs.json` is generated from it.
 ## The GUI
 
 `sisdefman gui` starts a local web app and opens it in your browser. It only listens on your
-own machine. Keep the terminal open while you use it.
+own machine. Keep the terminal open while you use it, and stop it with Ctrl+C or with
+**Quit** in the page.
+
+### Choosing a project
+
+The GUI opens the project in the current folder (`sisdefman.json`, or the one given with
+`-p`). If there is none, it starts with a **project chooser**:
+
+- **Recent projects.** The projects you opened before, one click away.
+- **Browse.** A folder browser that marks sisdefman projects, with an Open button on each.
+- **New project in this folder.** Tick Steam item definition files to import them, as
+  `sisdefman import` would, or create an empty project.
+
+```sh
+sisdefman gui              # this folder's project, or the chooser
+sisdefman gui --choose     # always start with the chooser
+sisdefman-gui              # the chooser from anywhere, e.g. from a desktop shortcut
+sisdefman-gui mygame.json  # open that project
+```
+
+Click the project's file name in the top bar to go back to the chooser and open another
+project. The list of recent projects is kept in `recent.json` in your settings folder:
+
+- Windows: `%APPDATA%\sisdefman`
+- macOS: `~/Library/Application Support/sisdefman`
+- other systems: `~/.config/sisdefman`
+
+### Working in the GUI
 
 - **Items.** Browse all items, one series, one kind, or the definitions outside any series,
   and search by name, ID, tag or field. Select an item to edit it:
@@ -65,8 +92,10 @@ own machine. Keep the terminal open while you use it.
   - Record the live baseline.
   - Export, and import more Steam files.
   - Edit the series line and the dummy item.
+  - Open another project, or quit.
 - **Check.** Lists problems, each linked to its item.
-- **Undo.** Covers every change made in the GUI during the session.
+- **Undo.** Covers every change made in the GUI to the open project; switching projects
+  starts a fresh history.
 
 In release mode, the GUI shows the same warning and asks for the same typed confirmation as
 the command line.
@@ -413,7 +442,7 @@ the next free one. Appending is always safe.
 | --- | --- |
 | `import FILE ... [--replace]` | create the project, or add more Steam files to it |
 | `export [-o FILE] [--mark-live]` | write every definition to one Steam-ready file |
-| `gui [--port N] [--no-browser]` | open the graphical editor |
+| `gui [--choose] [--port N] [--no-browser]` | open the graphical editor (with the project chooser if there is no project here) |
 | `check` | validate the project (schema, templates, references, series, colours...) |
 | `list [SERIES] [--all]` / `show ID [--stored]` | series overview / one definition as exported |
 | `query` / `set` | find and change items (see above) |

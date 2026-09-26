@@ -689,9 +689,21 @@ def cmd_table(args) -> int:
     return _guarded_save(args, project, protect, "This table change")
 
 
+def gui_project(args) -> Optional[str]:
+    """The project the GUI opens with: the one given with -p or
+    $SISDEFMAN_PROJECT, else sisdefman.json in this folder if there is one,
+    else none (the page asks for one)."""
+    if args.choose:
+        return None
+    explicit = getattr(args, "project", None) or os.environ.get("SISDEFMAN_PROJECT")
+    if explicit:
+        return explicit
+    return DEFAULT_PROJECT if os.path.exists(DEFAULT_PROJECT) else None
+
+
 def cmd_gui(args) -> int:
     from . import gui
-    return gui.serve(_project_path(args), host=args.host, port=args.port, open_browser=not args.no_browser)
+    return gui.serve(gui_project(args), host=args.host, port=args.port, open_browser=not args.no_browser)
 
 
 # ------------------------------------------------------------------ parser
@@ -914,7 +926,10 @@ def build_parser() -> argparse.ArgumentParser:
     guarded(sp)
     sp.set_defaults(func=cmd_table)
 
-    p = command("gui", "Open the graphical editor in your browser.")
+    p = command("gui", "Open the graphical editor in your browser. Without a project in this folder "
+                       "(or with --choose) it starts with a project chooser.")
+    p.add_argument("--choose", action="store_true",
+                   help="start with the project chooser even if this folder has a project")
     p.add_argument("--port", type=int, default=0, help="port to listen on (default: any free port)")
     p.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
     p.add_argument("--no-browser", action="store_true", help="only print the address")

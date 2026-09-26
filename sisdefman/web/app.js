@@ -76,6 +76,7 @@ async function request(path, body) {
 async function refresh() {
   const { result } = await request("state");
   S = result;
+  if (!S.open) { render(); return; }
   // An item open in the editor without unsaved edits follows the new state.
   const d = ui.draft;
   if (d && d.mode === "edit" && !d.dirty) openDraft(d.id);
@@ -196,6 +197,7 @@ function promptModal(title, fields, okLabel) {
 
 function render() {
   const app = document.getElementById("app");
+  if (!S.open) { app.replaceChildren(renderLauncher()); return; }
   app.replaceChildren(h("div", { class: "shell" }, renderTopbar(), h("div", { class: "body" }, renderSidebar(), renderPage())));
 }
 
@@ -206,7 +208,8 @@ function renderTopbar() {
   return h("header", { class: "topbar" },
     h("button", { class: "btn icon menu-toggle", title: "Menu", onclick: () => { ui.menuOpen = !ui.menuOpen; render(); } }, "☰"),
     h("span", { class: "brand" }, "sisdefman"),
-    h("span", { class: "file", title: S.path }, S.file + (S.appid ? ` · app ${S.appid}` : "")),
+    h("button", { class: "file-switch", title: S.path + "\nClick to open another project", onclick: switchProject },
+      h("span", { class: "file" }, S.file + (S.appid ? ` · app ${S.appid}` : "")), h("span", { class: "hint" }, " ⇄")),
     h("button", {
       class: "badge " + S.mode, title: "Change the mode in Settings",
       onclick: () => go("settings"),
@@ -274,6 +277,153 @@ function renderPage() {
   const pages = { items: renderItemsPage, kinds: renderKindsPage, tables: renderTablesPage,
     series: renderSeriesPage, settings: renderSettingsPage, check: renderCheckPage };
   return (pages[ui.page] || renderItemsPage)();
+}
+
+/* ------------------------------------------------------------ project chooser */
+
+const launch = { listing: null, loading: false, checked: new Set(), filename: "sisdefman.json", appid: "", error: null };
+
+function resetUi() {
+  Object.assign(ui, {
+    page: "items", scope: { type: "all" }, search: "", selected: null, draft: null, menuOpen: false,
+    kindSel: null, kindDraft: null, tableSel: null, tableDraft: null, seriesSel: null, seriesDraft: null,
+  });
+  ui.checked.clear();
+  launch.listing = null;
+  launch.checked.clear();
+  launch.filename = "sisdefman.json";
+}
+
+async function switchProject() {
+  if (!confirmDiscard()) return;
+  try {
+    await request("launcher/close", {});
+    resetUi();
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function openProject(path) {
+  try {
+    await request("launcher/open", { path });
+    resetUi();
+    await refresh();
+    toast(`Opened ${S.file}.`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function browseTo(path) {
+  launch.loading = true;
+  try {
+    launch.listing = (await request("launcher/browse", { path })).result;
+    launch.checked.clear();
+    launch.error = null;
+  } catch (e) {
+    if (launch.listing) toast(e.message, true); else launch.error = e.message;
+  }
+  launch.loading = false;
+  render();
+}
+
+async function quitApp() {
+  if (S.open && !confirmDiscard()) return;
+  if (!(await confirmModal("Quit sisdefman", "Stop the sisdefman server? This page stops working until you start it again.", "Quit"))) return;
+  try { await request("app/quit", {}); } catch (e) { /* it may already be gone */ }
+  ui.draft = null;
+  document.getElementById("app").replaceChildren(h("div", { class: "placeholder" },
+    h("h3", {}, "sisdefman has stopped"),
+    h("p", {}, "You can close this tab. Start it again with ", h("code", {}, "sisdefman gui"), ".")));
+}
+
+function renderLauncher() {
+  if (!launch.listing && !launch.loading && !launch.error) setTimeout(() => browseTo(null), 0);
+  const L = launch.listing;
+
+  const recent = S.recent.length
+    ? h("div", { class: "recent-list" }, S.recent.map((r) => h("div", { class: "recent" + (r.exists ? "" : " missing") },
+      h("button", { class: "recent-open", disabled: !r.exists, title: r.path, onclick: () => openProject(r.path) },
+        h("b", {}, r.name), h("span", { class: "hint mono" }, r.folder),
+        h("span", { class: "hint" }, r.exists ? `opened ${r.opened_at}` : "file not found")),
+      h("button", { class: "btn icon", title: "Remove from the list", onclick: async () => {
+        try { S.recent = (await request("launcher/forget", { path: r.path })).result.recent; render(); } catch (e) { toast(e.message, true); }
+      } }, "✕"))))
+    : h("p", { class: "hint" }, "Projects you open appear here.");
+
+  const pathInput = h("input", { type: "text", class: "mono", value: L ? L.path : "",
+    onkeydown: (ev) => { if (ev.key === "Enter") browseTo(pathInput.value); } });
+  const entries = !L ? h("div", { class: "empty" }, launch.error || "Loading…") : h("div", { class: "files" },
+    L.entries.length ? L.entries.map((e) => {
+      if (e.type === "dir") {
+        return h("button", { class: "file-row", onclick: () => browseTo(e.path) },
+          h("span", { class: "ftype dir" }, "folder"), h("span", { class: "fname" }, e.name));
+      }
+      if (e.type === "project") {
+        return h("div", { class: "file-row project" },
+          h("span", { class: "ftype project" }, "project"), h("span", { class: "fname" }, e.name),
+          h("button", { class: "btn small primary", onclick: () => openProject(e.path) }, "Open"));
+      }
+      const cb = h("input", { type: "checkbox", checked: launch.checked.has(e.path), onchange: (ev) => {
+        ev.target.checked ? launch.checked.add(e.path) : launch.checked.delete(e.path); render();
+      } });
+      return h("label", { class: "file-row" }, h("span", { class: "ftype" }, "json"), h("span", { class: "fname" }, e.name),
+        h("span", { class: "hint" }, e.size === null ? "" : `${Math.max(1, Math.round(e.size / 1024))} KB`), cb);
+    }) : h("div", { class: "empty" }, "No folders or JSON files here."));
+
+  const clash = h("div", { class: "hint", style: "color:var(--danger)" });
+  const createBtn = h("button", { class: "btn primary" });
+  const checkName = () => {
+    let name = launch.filename.trim() || "sisdefman.json";
+    if (!name.toLowerCase().endsWith(".json")) name += ".json";
+    const exists = L && L.entries.some((e) => e.name.toLowerCase() === name.toLowerCase());
+    clash.textContent = exists ? `${name} already exists in this folder.` : "";
+    createBtn.disabled = !!exists;
+  };
+  const nameInput = h("input", { type: "text", class: "mono", value: launch.filename, oninput: (ev) => { launch.filename = ev.target.value; checkName(); } });
+  const appidInput = h("input", { type: "number", min: 1, value: launch.appid, placeholder: "optional", oninput: (ev) => { launch.appid = ev.target.value; } });
+  const ticked = [...launch.checked];
+  const create = async () => {
+    try {
+      const { result } = await request("launcher/create", {
+        folder: L.path, filename: launch.filename, files: ticked, appid: launch.appid ? Number(launch.appid) : null,
+      });
+      resetUi();
+      await refresh();
+      modal({ title: `Created ${S.file}`, body: h("pre", { class: "json" }, result.report.join("\n")) });
+    } catch (e) { toast(e.message, true); }
+  };
+  createBtn.addEventListener("click", create);
+  createBtn.textContent = ticked.length ? `Create project from ${plural(ticked.length, "file")}` : "Create empty project";
+  checkName();
+
+  return h("div", { class: "launcher" },
+    h("header", { class: "topbar" }, h("span", { class: "brand" }, "sisdefman"), h("span", { class: "hint" }, "v" + S.version),
+      h("span", { class: "spacer" }), h("button", { class: "btn", onclick: quitApp }, "Quit")),
+    h("div", { class: "launcher-body" },
+      h("h2", {}, "Choose a project"),
+      h("p", { class: "lead" }, "A project is the one file that holds all of a game's item definitions. Open one, or create one from your Steam item definition files."),
+      h("div", { class: "card" }, h("h3", {}, "Recent projects"), recent),
+      h("div", { class: "card" },
+        h("h3", {}, "Browse"),
+        h("div", { class: "row", style: "margin-bottom:8px" },
+          h("button", { class: "btn", disabled: !L || !L.parent, title: "Up one folder", onclick: () => browseTo(L.parent) }, "↑ Up"),
+          h("button", { class: "btn", disabled: !L, title: "Home folder", onclick: () => browseTo(L.home) }, "Home"),
+          L && L.drives.length ? (() => {
+            const sel = h("select", { style: "width:auto", onchange: (ev) => browseTo(ev.target.value) },
+              h("option", { value: "" }, "Drive…"), L.drives.map((d) => h("option", { value: d }, d)));
+            return sel;
+          })() : null,
+          h("div", { class: "grow" }, pathInput),
+          h("button", { class: "btn", onclick: () => browseTo(pathInput.value) }, "Go")),
+        entries,
+        L ? h("div", { class: "new-project" },
+          h("h3", {}, "New project in this folder"),
+          h("div", { class: "row" },
+            h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "File name")), nameInput),
+            ticked.length ? null : h("div", { class: "field", style: "width:160px" }, h("div", { class: "label" }, h("b", {}, "Steam app ID")), appidInput)),
+          h("p", { class: "hint" }, ticked.length
+            ? `The ${plural(ticked.length, "ticked file")} will be imported, as with sisdefman import.`
+            : "Tick Steam item definition files above to import them, or create an empty project."),
+          clash, createBtn) : null)));
 }
 
 /* ------------------------------------------------------------ items page */
@@ -1467,10 +1617,18 @@ function renderSettingsPage() {
         mutate("settings/save", { dummy_item: value }, "Saved the dummy item.");
       } }, "Save")));
 
+  const appCard = h("div", { class: "card" },
+    h("h3", {}, "Project file"),
+    h("p", { class: "hint mono" }, S.path),
+    h("div", { class: "row" },
+      h("button", { class: "btn", onclick: switchProject }, "Open another project…"),
+      h("span", { style: "flex:1" }),
+      h("button", { class: "btn danger", onclick: quitApp }, "Quit sisdefman")));
+
   return h("div", { class: "page" },
     h("h2", {}, "Settings & export"),
     h("p", { class: "lead" }, S.path),
-    h("div", { class: "cards" }, modeCard, liveCard, exportCard, importCard, templateCard, dummyCard));
+    h("div", { class: "cards" }, modeCard, liveCard, exportCard, importCard, templateCard, dummyCard, appCard));
 }
 
 /* ------------------------------------------------------------ check page */

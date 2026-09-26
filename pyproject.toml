@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 sisdefman = "sisdefman.cli:main"
+sisdefman-gui = "sisdefman.gui:main"
 
 [tool.setuptools]
 packages = ["sisdefman"]

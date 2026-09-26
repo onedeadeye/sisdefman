@@ -8,6 +8,10 @@ change and saves. In release mode a change that alters a live item is
 answered with 409 and the list of affected items; the page shows the release
 warning and repeats the request with ``confirm`` once the user types the
 confirmation phrase.
+
+The server can start without a project; the page then shows a chooser
+(recent projects, a folder browser, creating a project) and the user can
+switch projects at any time.
 """
 
 from __future__ import annotations
@@ -23,10 +27,10 @@ import traceback
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, safety, steam, tableimport, ui
+from . import __version__, adopt, check, derive, edits, importer, jsonfmt, launcher, ops, safety, steam, tableimport, ui
 from .project import DEFAULT_DUMMY_ITEM, MODES, Project, ProjectError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -55,16 +59,33 @@ def _impact_json(imp: safety.Impact) -> dict:
 
 
 class App:
-    def __init__(self, path: str):
-        self.path = os.path.abspath(path)
+    def __init__(self, path: Optional[str] = None):
+        self.path = os.path.abspath(path) if path else None
         self.lock = threading.RLock()
         self.token = secrets.token_urlsafe(24)
         self.undo_stack: List[Tuple[str, str]] = []
+        self.shutdown: Optional[Callable[[], None]] = None  # set by make_server
 
     # ------------------------------------------------------------ plumbing
 
     def load(self) -> Project:
+        if self.path is None:
+            raise ProjectError("no project is open")
         return Project.load(self.path)
+
+    def open_project(self, path: str) -> dict:
+        with self.lock:
+            path = launcher.check_project(path)
+            self.path = path
+            self.undo_stack = []
+            launcher.remember(path)
+            return {"path": path}
+
+    def close_project(self) -> dict:
+        with self.lock:
+            self.path = None
+            self.undo_stack = []
+            return {}
 
     def mutate(self, action: str, fn: Callable[[Project], object], confirm: bool = False,
                record_undo: bool = True):
@@ -87,6 +108,9 @@ class App:
 
     def state(self) -> dict:
         with self.lock:
+            if self.path is None:
+                return {"open": False, "version": __version__, "recent": launcher.recent_projects(),
+                        "cwd": os.getcwd()}
             project = self.load()
         built, problems = project.build_with_problems()
         records = project.by_id()
@@ -118,6 +142,7 @@ class App:
                                secret_rules=[";".join(r) for r in project.secret_rules(key)])
         live_info = project.live
         return {
+            "open": True,
             "version": __version__,
             "path": self.path,
             "file": os.path.basename(self.path),
@@ -192,6 +217,8 @@ class App:
 
     def handle(self, route: str, body: dict):
         confirm = bool(body.get("confirm"))
+        if route.startswith(("launcher/", "app/")):
+            return self.handle_launcher(route, body)
         if route == "preview":
             return self.preview(body)
         if route == "undo":
@@ -261,6 +288,30 @@ class App:
             return self.import_files(body, confirm)
         if route == "diff":
             return self.diff()
+        raise ProjectError(f"unknown action {route!r}")
+
+    def handle_launcher(self, route: str, body: dict):
+        if route == "launcher/browse":
+            return launcher.browse(body.get("path") or None)
+        if route == "launcher/open":
+            return self.open_project(str(body.get("path") or ""))
+        if route == "launcher/close":
+            return self.close_project()
+        if route == "launcher/forget":
+            launcher.forget(str(body.get("path") or ""))
+            return {"recent": launcher.recent_projects()}
+        if route == "launcher/create":
+            appid = body.get("appid")
+            if isinstance(appid, str):
+                appid = int(appid) if appid.strip().isdigit() else (None if not appid.strip() else appid)
+            path, report = launcher.create_project(str(body.get("folder") or ""), str(body.get("filename") or ""),
+                                                   [str(f) for f in body.get("files") or []], appid)
+            self.open_project(path)
+            return {"path": path, "report": report}
+        if route == "app/quit":
+            if self.shutdown is not None:
+                threading.Timer(0.3, self.shutdown).start()
+            return {"stopping": True}
         raise ProjectError(f"unknown action {route!r}")
 
     def undo(self, confirm: bool):
@@ -561,28 +612,57 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(HTTPStatus.OK, {"ok": True, "result": result})
 
 
-def make_server(path: str, host: str = "127.0.0.1", port: int = 0) -> Tuple[ThreadingHTTPServer, App]:
-    if not os.path.exists(path):
-        raise ProjectError(f"{path} not found (create a project with `sisdefman import FILE...` first)")
-    Project.load(path)  # fail early on a broken file
-    app = App(path)
+def make_server(path: Optional[str] = None, host: str = "127.0.0.1",
+                port: int = 0) -> Tuple[ThreadingHTTPServer, App]:
+    """A server for ``path``, or with no project open (the page then asks
+    for one)."""
+    app = App()
+    if path:
+        if not os.path.exists(path):
+            raise ProjectError(f"{path} not found (create a project with `sisdefman import FILE...` first, "
+                               "or run `sisdefman gui --choose` to pick or create one in the browser)")
+        app.open_project(path)  # fails early on a broken file
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
+    app.shutdown = server.shutdown
     return server, app
 
 
-def serve(path: str, host: str = "127.0.0.1", port: int = 0, open_browser: bool = True) -> int:
+def serve(path: Optional[str] = None, host: str = "127.0.0.1", port: int = 0, open_browser: bool = True) -> int:
     server, _ = make_server(path, host, port)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(ui.green(f"sisdefman GUI for {path} at {url}"))
-    print("Keep this window open while you use it; press Ctrl+C to stop.")
+    if path:
+        print(ui.green(f"sisdefman GUI for {path} at {url}"))
+    else:
+        print(ui.green(f"sisdefman GUI at {url}") + " (no project open: choose or create one in the browser)")
+    print("Keep this window open while you use it; press Ctrl+C or use Quit in the page to stop.")
     if open_browser:
         threading.Timer(0.3, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
+        print("Stopped.")
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
         server.server_close()
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """``sisdefman-gui [PROJECT]``: open the GUI, with the project chooser
+    unless a project file is given. Handy for a desktop shortcut."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="sisdefman-gui",
+        description="Open the sisdefman GUI in your browser, with the project chooser unless a project file is given.")
+    parser.add_argument("project", nargs="?", help="project file to open (default: choose one in the browser)")
+    parser.add_argument("--port", type=int, default=0, help="port to listen on (default: any free port)")
+    parser.add_argument("--no-browser", action="store_true", help="only print the address")
+    args = parser.parse_args(argv)
+    try:
+        return serve(args.project, port=args.port, open_browser=not args.no_browser)
+    except ProjectError as e:
+        print(ui.red(f"error: {e}"))
+        return 1
