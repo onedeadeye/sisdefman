@@ -78,7 +78,9 @@ project. The list of recent projects is kept in `recent.json` in your settings f
 ### Working in the GUI
 
 - **Items.** Browse all items, one series, one kind, or the definitions outside any series,
-  and search by name, ID, tag or field. Select an item to edit it:
+  and search by name, ID, tag or field. A search word like `rarity:epic` or `type:skin` matches
+  that exact tag (or a field with that value); other words match any text. Select an item to
+  edit it:
   - fields of its kind, with drop-downs for lookup-table values;
   - its derived fields, each of which you can override for that one item;
   - any other Steam fields;
@@ -88,6 +90,8 @@ project. The list of recent projects is kept in `recent.json` in your settings f
 - **Series actions.** Add an item at the end or at a chosen position, duplicate, move or
   remove items.
 - **Item kinds and Lookup tables.** Edit the rules and tables. Previews update as you type.
+  **Import schema…** and **Export schema** on the Item kinds page load and save tables and
+  kinds as a file (the same format as `sisdefman schema import/export`).
   **Import CSV…** brings in reference data such as an Unreal DataTable export (below).
 - **Colors.** The colour palette, with swatches, the number of values using each colour and
   **Convert existing colours…** (see [Colours](#colours)).

@@ -220,6 +220,21 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(self.post("series/save", {"key": "x", "config": {"first_id": 70, "last_id": 80},
                                                    "is_new": True})[0], 400)  # no display name
 
+    def test_schema_import(self):
+        schema = {"tables": {"visuals": {"columns": ["label"], "rows": {"palette": {"label": "Colorway"}}}},
+                  "kinds": {"swatch": {"fields": {"visuals": {"type": "ref", "table": "visuals"}},
+                                       "derive": {"name": "{visuals.label}"}}}}
+        status, data = self.post("schema/import", {"schema": json.dumps(schema), "dry_run": True})
+        self.assertEqual((status, data["result"]["notes"][-1]), (200, "kind swatch: 1 field(s), 1 derived field(s)"))
+        self.assertNotIn("swatch", self.project().kinds)
+        self.assertEqual(self.post("schema/import", {"schema": schema})[0], 200)
+        self.assertIn("swatch", self.project().kinds)
+        self.assertEqual(self.post("schema/import", {"schema": "{nope"})[0], 400)
+        bad = {"kinds": {"x": {"fields": {"w": {"type": "ref", "table": "missing"}}, "derive": {}}}}
+        self.assertEqual(self.post("schema/import", {"schema": bad})[0], 400)
+        self.assertEqual(self.post("undo")[0], 200)
+        self.assertNotIn("swatch", self.project().kinds)
+
     def test_items_remove_move_set_export_import(self):
         status, data = self.post("item/move", {"id": 117, "position": 1})
         self.assertEqual(data["result"]["moved"]["117"], 110)

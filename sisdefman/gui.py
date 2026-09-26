@@ -280,6 +280,19 @@ class App:
         if route == "kind/save":
             return self.mutate("This kind change", lambda p: edits.replace_kind(
                 p, body["name"], body["kind"], body.get("old_name")), confirm)
+        if route == "schema/import":
+            data = body.get("schema")
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except ValueError as e:
+                    raise ProjectError(f"the schema is not valid JSON: {e}")
+
+            def merge(p: Project):
+                return {"notes": edits.import_schema(p, data)}
+            if body.get("dry_run"):
+                return merge(self.load())
+            return self.mutate("Importing this schema", merge, confirm)
         if route == "kind/delete":
             return self.mutate("Deleting this kind", lambda p: _delete_kind(p, body), confirm)
         if route == "series/save":

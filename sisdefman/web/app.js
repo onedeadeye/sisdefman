@@ -477,10 +477,20 @@ function scopedItems() {
   });
   const q = ui.search.trim().toLowerCase();
   if (q) {
+    // "category:value" is an exact tag (or a field with that value); other words match any text.
+    const tagWord = /^([\w-]+):([^\s:]*)$/;
     list = list.filter((e) => {
       const hay = [e.id, e.item.name, e.item.type, e.item.tags, e.record && e.record.kind,
         ...Object.values(e.record || {}).map(show)].join("\n").toLowerCase();
-      return q.split(/\s+/).every((w) => hay.includes(w));
+      const tags = String(e.item.tags || "").toLowerCase().split(";").map((t) => t.trim());
+      return q.split(/\s+/).every((w) => {
+        const m = w.match(tagWord);
+        if (!m) return hay.includes(w);
+        const [, cat, value] = m;
+        const field = e.item[cat] ?? (e.record || {})[cat];
+        return tags.some((t) => (value ? t === w : t.startsWith(cat + ":")))
+          || (field !== undefined && field !== null && (value ? String(field).toLowerCase() === value : true));
+      });
     });
   }
   return list;
@@ -500,7 +510,7 @@ function renderItemsPage() {
   const sc = ui.scope;
   const series = sc.type === "series" ? S.series[sc.value] : null;
   const search = h("input", {
-    class: "search", type: "text", placeholder: "Search name, ID, tags, fields…", value: ui.search,
+    class: "search", type: "text", placeholder: "Search name, ID, fields, or a tag like rarity:epic", value: ui.search,
     oninput: debounce((e) => { ui.search = e.target.value; renderGridOnly(); }, 150),
   });
   const addButton = series
@@ -1152,6 +1162,40 @@ const previewKind = debounce(async () => {
   } catch (e) { refs.kindPreview.textContent = e.message; }
 }, 250);
 
+/* Import a schema file (tables and kinds, as `sisdefman schema export` writes it). */
+async function importSchemaDialog() {
+  const text = h("textarea", { rows: 12, class: "mono", placeholder: '{"tables": {...}, "kinds": {...}}' });
+  const file = h("input", { type: "file", accept: ".json,application/json",
+    onchange: async () => { if (file.files[0]) { text.value = await file.files[0].text(); check(); } } });
+  const report = h("div", { class: "hint" }, "Tables of the same name get the new columns and rows; kinds of the same name are replaced.");
+  let importBtn = null;
+  const check = debounce(async () => {
+    if (!text.value.trim()) return;
+    try {
+      const { result } = await request("schema/import", { schema: text.value, dry_run: true });
+      report.replaceChildren(h("pre", { class: "json" }, result.notes.join("\n")));
+      if (importBtn) importBtn.disabled = false;
+    } catch (e) {
+      report.replaceChildren(h("div", { class: "problems" }, e.message));
+      if (importBtn) importBtn.disabled = true;
+    }
+  }, 300);
+  text.addEventListener("input", check);
+  const ok = await modal({
+    title: "Import a schema", wide: true,
+    body: h("div", {}, h("div", { class: "field" }, file), h("div", { class: "field" }, text), report),
+    actions: [{ label: "Cancel", value: false },
+      { label: "Import", value: true, class: "primary", disabled: true, bind: (b) => { importBtn = b; } }],
+  });
+  if (ok && await mutate("schema/import", { schema: text.value }, "Imported the schema.")) { ui.kindDraft = null; render(); }
+}
+
+function exportSchema() {
+  const blob = new Blob([JSON.stringify({ tables: S.tables, kinds: S.kinds }, null, 2) + "\n"], { type: "application/json" });
+  const a = h("a", { href: URL.createObjectURL(blob), download: "schema.json" });
+  document.body.append(a); a.click(); a.remove();
+}
+
 function renderKindsPage() {
   const names = Object.keys(S.kinds);
   if (ui.kindSel && ui.kindSel !== "__new__" && !S.kinds[ui.kindSel]) ui.kindSel = null;
@@ -1242,7 +1286,9 @@ function renderKindsPage() {
   };
 
   return h("div", { class: "page" },
-    h("h2", {}, "Item kinds"),
+    h("div", { class: "row" }, h("h2", { class: "grow" }, "Item kinds"),
+      h("button", { class: "btn small", title: "Load tables and kinds from a schema file", onclick: importSchemaDialog }, "Import schema…"),
+      h("button", { class: "btn small", title: "Save all tables and kinds as a schema file", onclick: exportSchema }, "Export schema")),
     h("p", { class: "lead" }, "A kind describes a family of similar items. Its fields are what you enter for each item; its rules build the Steam fields from them. To use a kind for existing items, tick them in the item list and choose Convert."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
