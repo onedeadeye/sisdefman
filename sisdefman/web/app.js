@@ -117,6 +117,11 @@ async function refresh() {
   if (d && d.mode === "edit" && !d.dirty) openDraft(d.id);
   render();
   if (ui.draft) requestPreview();
+  const key = S.notice ? S.path + "|" + S.notice.title : null;
+  if (key && ui.noticeShown !== key) {
+    ui.noticeShown = key;
+    modal({ title: S.notice.title, body: h("div", {}, S.notice.lines.map((l) => h("p", {}, l))) });
+  }
 }
 
 /* Send a change; in release mode show the warning if the server asks. */
@@ -850,14 +855,21 @@ function referenceHint(rec, e, kind) {
     const columns = (t.columns || []).filter((c) => key !== undefined && rows[key][c] !== undefined && rows[key][c] !== "");
     found.push({ name, value, key, own, columns, row: key !== undefined ? rows[key] : null });
   }
+  const series = e && e.series ? S.series[e.series] : null;
+  if (series) {  // the item's place in its series
+    const n = series.members.length, secret = series.secret_ids.length;
+    found.unshift({ name: "series", value: e.series, key: e.series, own: null, series: true,
+      columns: ["name", "index", "count", "count_no_secret", "count_secret"],
+      row: { name: series.display_name, index: e.index, count: n, count_no_secret: n - secret, count_secret: secret } });
+  }
   if (!found.length) {
     return Object.keys(S.tables).length ? h("div", { class: "hint ref-hint" },
       `Fields can read lookup tables: {table.column} uses the row named by this item's field or tag of the same name (e.g. a ${Object.keys(S.tables)[0]}: tag).`) : null;
   }
   const copy = (text) => { try { navigator.clipboard.writeText(text); toast(`Copied ${text}`); } catch (err) { /* no clipboard */ } };
-  return h("div", { class: "hint ref-hint" }, "Fields can read lookup tables (click to copy):",
+  return h("div", { class: "hint ref-hint" }, "Fields can use these values (click to copy):",
     found.map((f) => h("div", { class: "ref-table" },
-      h("div", {}, h("b", {}, f.name), f.row
+      h("div", {}, h("b", {}, f.name), f.series ? ` → its place in series ${f.key}` : f.row
         ? ` → row ${f.key} (from ${f.own !== null ? `its ${f.name} field` : `the tag ${f.name}:${f.value}`})`
         : ` → no row ${JSON.stringify(f.value)} in this table (from ${f.own !== null ? `its ${f.name} field` : `the tag ${f.name}:${f.value}`})`),
       f.row ? f.columns.slice(0, 6).map((c) => h("button", { class: "ref-chip", title: String(f.row[c]), onclick: () => copy(`{${f.name}.${c}}`) },
@@ -1344,8 +1356,12 @@ function tableUsage(name) {
 function makeTableDraft(name) {
   if (!name || name === "__new__") return { for: name, name: "", old: null, columns: ["name"], rows: [] };
   const t = S.tables[name];
+  // Values stored under a column the table doesn't declare are shown as columns
+  // too, so they can be seen, renamed or removed.
+  const undeclared = [...new Set(Object.values(t.rows || {}).flatMap((v) => Object.keys(v)))]
+    .filter((c) => !(t.columns || []).includes(c));
   return {
-    for: name, name, old: name, columns: [...(t.columns || [])],
+    for: name, name, old: name, columns: [...(t.columns || []), ...undeclared], undeclared, columnRenames: {},
     rows: Object.entries(t.rows || {}).map(([key, values]) => ({ key, orig: key, values: { ...values } })),
   };
 }
@@ -1364,19 +1380,29 @@ function renderTablesPage() {
     h("button", { onclick: () => importCsvDialog(d.old) }, "Import CSV…"));
 
   const columnEditors = d.columns.map((c, i) => h("span", { class: "row", style: "display:inline-flex;margin:0 8px 6px 0" },
-    h("input", { type: "text", class: "mono", style: "width:130px", value: c, oninput: (ev) => {
-      const old = d.columns[i]; const nv = ev.target.value;
-      d.columns[i] = nv;
-      for (const r of d.rows) { if (old in r.values) { r.values[nv] = r.values[old]; delete r.values[old]; } }
-    } }),
+    h("input", { type: "text", class: "mono" + ((d.undeclared || []).includes(c) ? " undeclared" : ""), style: "width:130px", value: c,
+      title: (d.undeclared || []).includes(c) ? "Rows have values under this name, but the table didn't declare it" : "",
+      onchange: (ev) => {
+        const old = d.columns[i]; const nv = ev.target.value.trim();
+        if (!nv || nv === old) { ev.target.value = old; return; }
+        if (d.columns.includes(nv)) { toast(`There is already a column ${nv}.`, true); ev.target.value = old; return; }
+        d.columns[i] = nv;
+        for (const r of d.rows) { if (old in r.values) { r.values[nv] = r.values[old]; delete r.values[old]; } }
+        // Remember saved columns' renames, so templates that read them follow.
+        const orig = Object.keys(d.columnRenames || {}).find((k) => d.columnRenames[k] === old)
+          ?? (((S.tables[d.old] || {}).columns || []).includes(old) ? old : null);
+        if (orig !== null && d.columnRenames) d.columnRenames[orig] = nv;
+        render();  // the cells below write to the new name
+      } }),
     h("button", { class: "btn icon", title: "Remove column", onclick: () => {
       const col = d.columns[i]; d.columns.splice(i, 1); for (const r of d.rows) delete r.values[col]; render();
     } }, "✕")));
 
   const rows = d.rows.map((r, n) => h("tr", {},
     h("td", {}, h("input", { type: "text", class: "mono", value: r.key, oninput: (ev) => { r.key = ev.target.value; } })),
-    d.columns.map((c) => {
-      const set = (v) => { if (v === "") delete r.values[c]; else r.values[c] = v; };
+    d.columns.map((c, i) => {
+      // Look the column up when writing: it may have been renamed since.
+      const set = (v) => { const col = d.columns[i]; if (v === "") delete r.values[col]; else r.values[col] = v; };
       return h("td", {}, isColorColumn(c) ? colorInput(r.values[c] ?? "", set)
         : h("input", { type: "text", value: r.values[c] ?? "", oninput: (ev) => set(ev.target.value) }));
     }),
@@ -1392,13 +1418,13 @@ function renderTablesPage() {
       const key = r.key.trim();
       if (!key) { toast("Every row needs a key.", true); return; }
       if (key in table.rows) { toast(`Two rows have the key ${key}.`, true); return; }
-      table.rows[key] = r.values;
+      table.rows[key] = Object.fromEntries(Object.entries(r.values).filter(([c]) => table.columns.includes(c)));
       if (r.orig && r.orig !== key) renames[r.orig] = key;
     }
     const gone = Object.keys(used).filter((k) => !d.rows.some((r) => r.orig === k));
     if (gone.length && !(await confirmModal("Delete rows in use",
       `Rows ${gone.join(", ")} are used by items. Those items will show problems until you pick another value.`, "Save anyway", true))) return;
-    const r = await mutate("table/save", { name, old_name: d.old, table, renames }, `Saved table ${name}.`);
+    const r = await mutate("table/save", { name, old_name: d.old, table, renames, column_renames: d.columnRenames || {} }, `Saved table ${name}.`);
     if (r) { ui.tableSel = name; ui.tableDraft = null; render(); }
   };
   const del = async () => {
@@ -1410,14 +1436,16 @@ function renderTablesPage() {
 
   return h("div", { class: "page" },
     h("h2", {}, "Lookup tables"),
-    h("p", { class: "lead" }, "A table maps keys to values, e.g. the weapon pistol to the name \"Pistol\". Any item field can read a row's columns as {weapon.name}: the row is the one named by the item's weapon field or its weapon: tag (keys match ignoring case), or by a kind's ref field. Changing a value here changes every item that uses it. Renaming a key updates the items that name it in a field."),
+    h("p", { class: "lead" }, "A table maps keys to values, e.g. the weapon pistol to the name \"Pistol\". Any item field can read a row's columns as {weapon.name}: the row is the one named by the item's weapon field or its weapon: tag (keys match ignoring case), or by a kind's ref field. Changing a value here changes every item that uses it. Renaming a key updates the items that name it in a field; renaming a column updates the templates that read it."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
         h("div", { class: "card" },
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Name")),
             h("input", { type: "text", class: "mono", value: d.name, placeholder: "e.g. weapon", oninput: (ev) => { d.name = ev.target.value; } })),
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Columns")),
-            h("div", {}, columnEditors, h("button", { class: "btn small", onclick: () => { d.columns.push("column" + (d.columns.length + 1)); render(); } }, "+ Column")))),
+            h("div", {}, columnEditors, h("button", { class: "btn small", onclick: () => { d.columns.push("column" + (d.columns.length + 1)); render(); } }, "+ Column")),
+            (d.undeclared || []).some((c) => d.columns.includes(c)) ? h("div", { class: "hint", style: "color:var(--warn)" },
+              `${d.undeclared.filter((c) => d.columns.includes(c)).join(", ")}: values stored under a name the table doesn't list as a column (nothing uses them). Save to keep them as a column, or remove them with ✕.`) : null)),
         h("div", { class: "card" },
           h("div", { class: "hscroll" }, h("table", { class: "edit wide" },
             h("thead", {}, h("tr", {}, h("th", {}, "Key"), d.columns.map((c) => h("th", {}, c)), h("th", {}, "Items"), h("th", {}))),
@@ -1639,14 +1667,13 @@ function makeSeriesDraft(key) {
     const sug = S.new_series || {};
     return {
       for: key, is_new: true, key: sug.key || "", name: "", first_id: sug.first_id ?? "", last_id: sug.last_id ?? "",
-      template: "", secret: "", containers: [], generators: [],
+      secret: "", containers: [], generators: [],
       copy: { source: sug.source || "", plan: null, planFor: null, error: null, edited: false, ticked: new Set(), newIds: {}, replacements: [] },
     };
   }
   const s = S.series[key];
   return {
     for: key, is_new: false, key, name: s.name || "", first_id: s.first_id, last_id: s.last_id,
-    template: typeof s.description_template === "string" ? s.description_template : "",
     secret: Array.isArray(s.secret) ? s.secret.join(", ") : (s.secret || ""),
     containers: Object.entries(s.containers || {}).map(([id, cfg]) => ({ id, exclude: ((cfg || {}).exclude || []).join(", ") })),
     generators: Object.entries(s.generators || {}).map(([id, rule]) => ({ id, rule })),
@@ -1777,7 +1804,6 @@ function renderSeriesPage() {
   const create = async () => {
     const key = d.key.trim();
     const config = { name: d.name.trim(), first_id: Number(d.first_id), last_id: Number(d.last_id) };
-    if (d.template) config.description_template = d.template;
     if (d.secret.trim()) config.secret = d.secret.trim();
     const c = d.copy;
     if (!c.edited && c.planFor !== planArgs(d)) {  // typed faster than the list followed
@@ -1800,7 +1826,6 @@ function renderSeriesPage() {
     if (copying) return create();
     const config = {
       name: d.name.trim(), last_id: Number(d.last_id),
-      description_template: d.template,
       secret: d.secret.includes(",") ? d.secret.split(",").map((x) => x.trim()).filter(Boolean) : d.secret.trim(),
       containers: Object.fromEntries(d.containers.filter((c) => c.id).map((c) => [c.id, { exclude: c.exclude.split(/[,\s]+/).filter(Boolean) }])),
       generators: Object.fromEntries(d.generators.filter((g) => g.id).map((g) => [g.id, g.rule])),
@@ -1820,7 +1845,7 @@ function renderSeriesPage() {
 
   return h("div", { class: "page" },
     h("h2", {}, "Series setup"),
-    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it, and that number is written into their descriptions. Containers get a list of the series' items at {contents} (or {contents_no_secret} / {contents_secret}: without / only the secret rares), and can use {count}, {count_no_secret}, {count_secret} and {series_name}; generators listed here always hold every series item with the given tags."),
+    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it: any template or item field can show it with {series.name}, {series.index}, {series.count}, {series.count_no_secret} and {series.count_secret}. Containers get a list of the series' items at {contents} (or {contents_no_secret} / {contents_secret}: without / only the secret rares) and can use the same {series.…} values; generators listed here always hold every series item with the given tags."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
         h("div", { class: "card" },
@@ -1836,8 +1861,7 @@ function renderSeriesPage() {
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Secret rares"),
             h("span", {}, "items with these tags; empty = the tags the containers leave out")),
           input("secret", { class: "mono", placeholder: s && !("secret" in s) && s.secret_rules.length ? s.secret_rules.join(", ") + " (from the containers)" : "e.g. rarity:epic" })),
-          h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Description template"), h("span", {}, "empty = the global one")),
-            (() => { const ta = h("textarea", { rows: 2, class: "mono", placeholder: S.settings.description_template, oninput: (ev) => { d.template = ev.target.value; } }); ta.value = d.template; return ta; })())),
+          h("p", { class: "hint" }, "To number items in their descriptions, write a series line such as {series.name} #{series.index} into the kind's description rule (as its own paragraph) or into the item's description.")),
         d.is_new ? renderStartFrom(d) : null,
         copying ? null : h("div", { class: "card" },
           h("h3", {}, "Containers"),
@@ -1916,15 +1940,6 @@ function renderSettingsPage() {
         if (r) modal({ title: "Import report", body: h("pre", { class: "json" }, r.report.join("\n")) });
       } }, "Import")));
 
-  const tmpl = h("textarea", { rows: 3, class: "mono" });
-  tmpl.value = typeof S.settings.description_template === "string" ? S.settings.description_template : JSON.stringify(S.settings.description_template);
-  const templateCard = h("div", { class: "card" },
-    h("h3", {}, "Series line in descriptions"),
-    h("p", { class: "hint" }, "Applied to every series item's description. Fields: {description}, {series_name}, {index}, {count}, {count_no_secret}, {count_secret}, {series}, {itemdefid}, {name}, {tags[rarity]} and the item's own fields."),
-    tmpl,
-    h("div", { class: "row", style: "margin-top:8px" }, h("span", { style: "flex:1" }),
-      h("button", { class: "btn primary", onclick: () => mutate("settings/save", { description_template: tmpl.value }, "Saved the template.") }, "Save")));
-
   const dummy = h("textarea", { rows: 9, class: "mono" });
   dummy.value = JSON.stringify(S.settings.dummy_item, null, 2);
   const dummyCard = h("div", { class: "card" },
@@ -1949,7 +1964,7 @@ function renderSettingsPage() {
   return h("div", { class: "page" },
     h("h2", {}, "Settings & export"),
     h("p", { class: "lead" }, S.path),
-    h("div", { class: "cards" }, modeCard, liveCard, exportCard, importCard, templateCard, dummyCard, appCard));
+    h("div", { class: "cards" }, modeCard, liveCard, exportCard, importCard, dummyCard, appCard));
 }
 
 /* ------------------------------------------------------------ check page */

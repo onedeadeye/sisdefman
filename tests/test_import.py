@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from sisdefman import check, importer
+from sisdefman import check, importer, ops
 from sisdefman.project import CONTENTS_TOKEN, Project, ProjectError
 
 from tests import fixtures
@@ -40,30 +40,30 @@ class ImportTests(unittest.TestCase):
         self.assertIsNone(project.item(118))
         self.assertIn(CONTENTS_TOKEN, project.item(1)["description"])
 
-    def test_round_trip_without_series_text(self):
+    def test_round_trip(self):
         project, _ = importer.import_files(self.paths)
-        project.settings["description_template"] = "{description}"
         built = {it["itemdefid"]: it for it in project.build()}
         original = fixtures.all_items()
         self.assertEqual(built, original)
         for i in original:
             self.assertEqual(list(built[i]), list(original[i]), f"key order of {i}")
 
-    def test_series_text_in_descriptions(self):
-        project, _ = importer.import_files(self.paths)
+    def test_series_lines_in_the_files_follow_renumbering(self):
+        doc = fixtures.crate_file()
+        for n, it in enumerate(it for it in doc["items"] if 110 <= it["itemdefid"] <= 117):
+            it["description"] += f"\n\nTest Series #{n + 1}"
+        project, _ = importer.import_files([write(self.dir, "c.json", doc)])
+        self.assertEqual(project.item(110)["description"],
+                         "Applies the Red appearance to the Pistol.\n\n{series.name} #{series.index}")
         built = {it["itemdefid"]: it for it in project.build()}
-        self.assertEqual(built[110]["description"],
-                         "Applies the Red appearance to the Pistol.\n\nTest Series #1")
-        self.assertTrue(built[117]["description"].endswith("\n\nTest Series #8"))
-        # Only series items get it.
-        self.assertNotIn("#", built[101].get("description", ""))
+        self.assertEqual(built, {it["itemdefid"]: it for it in doc["items"]})
+        ops.remove_item(project, 112)
+        built = {it["itemdefid"]: it for it in project.build()}
+        self.assertTrue(built[112]["description"].endswith("\n\nTest Series #3"))  # was #4
 
-    def test_reimporting_an_export_strips_series_text(self):
+    def test_nothing_is_added_to_descriptions(self):
         project, _ = importer.import_files(self.paths)
-        exported = write(self.dir, "export.json", project.export_document())
-        again, _ = importer.import_files([exported])
-        self.assertEqual(again.item(110)["description"], "Applies the Red appearance to the Pistol.")
-        self.assertEqual(again.build(), project.build())
+        self.assertEqual(project.build()[8]["description"], "Applies the Red appearance to the Pistol.")
 
     def test_stale_container_list_is_reported(self):
         doc = fixtures.crate_file()

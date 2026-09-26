@@ -197,6 +197,7 @@ pre.json {
 .list button:last-child { border-bottom: 0; }
 .list button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .ref-hint { margin-top: 8px; line-height: 1.9; }
+input.undeclared { border-style: dashed; border-color: var(--warn); }
 .ref-chip { font: 12px var(--mono, monospace); border: 1px solid var(--border); background: var(--panel); color: var(--accent);
   border-radius: 4px; padding: 1px 6px; margin-right: 4px; cursor: pointer; }
 .ref-chip span { color: var(--muted); }

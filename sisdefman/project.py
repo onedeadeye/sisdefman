@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from . import colors, derive, jsonfmt, steam
 from .derive import SeriesInfo
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 KEY_ORDER = ("sisdefman", "appid", "mode", "settings", "colors", "tables", "kinds", "series", "items", "live")
 MODES = ("prerelease", "release")
 
@@ -41,8 +41,6 @@ MODES = ("prerelease", "release")
 # the series' item names.
 CONTENTS_TOKEN = "{contents}"
 LISTING_TOKENS = (CONTENTS_TOKEN, "{contents_no_secret}", "{contents_secret}")
-
-DEFAULT_DESCRIPTION_TEMPLATE = "{description}\n\n{series_name} #{index}"
 
 # Matches the placeholder definitions already used for retired IDs.
 DEFAULT_DUMMY_ITEM = {
@@ -57,8 +55,6 @@ DEFAULT_DUMMY_ITEM = {
     "marketable": False,
 }
 
-TEMPLATE_FIELDS = ("description", "series", "series_name", "index", "count", "count_no_secret", "count_secret",
-                   "itemdefid", "name", "tags")
 
 # While building, the name of a series without a display name is this marker
 # around its key, so any text that would show the key is found and reported.
@@ -68,7 +64,8 @@ NO_DISPLAY_NAME = "has no display name"
 
 # Tokens filled in in the descriptions of a series' containers.
 CONTAINER_TOKENS = ("{contents}", "{contents_no_secret}", "{contents_secret}", "{count}", "{count_no_secret}",
-                    "{count_secret}", "{series_name}")
+                    "{count_secret}", "{series_name}", "{series.name}", "{series.count}", "{series.count_no_secret}",
+                    "{series.count_secret}")
 
 
 class ProjectError(Exception):
@@ -83,7 +80,13 @@ class Project:
     def __init__(self, data: dict, path: Optional[str] = None):
         self.data = data
         self.path = path
-        self._check_shape()
+        self.upgrade_notes: List[str] = []
+        self.upgraded_from = data.get("sisdefman") if data.get("sisdefman") != FORMAT_VERSION else None
+        lines = self._check_shape()
+        if lines is not None:
+            from .migrate import fold_series_lines
+
+            self.upgrade_notes = fold_series_lines(self, *lines)
 
     # ------------------------------------------------------------ load/save
 
@@ -94,7 +97,6 @@ class Project:
             "appid": appid,
             "mode": "prerelease",
             "settings": {
-                "description_template": DEFAULT_DESCRIPTION_TEMPLATE,
                 "dummy_item": copy.deepcopy(DEFAULT_DUMMY_ITEM),
             },
             "colors": {},
@@ -138,21 +140,35 @@ class Project:
         os.replace(tmp, path)
         self.path = path
 
-    def _check_shape(self) -> None:
+    def _check_shape(self):
+        """Check and upgrade the file. Returns the series-line templates of a
+        file older than version 5, which the caller folds into the items."""
         d = self.data
+        lines = None
         if d.get("sisdefman") in (1, 2, 3):
             # Version 2 added tables and kinds, version 3 colors. Before version 4 a
             # series without a display name stored its key as its name.
             for key, s in (d.get("series") or {}).items():
                 if isinstance(s, dict) and s.get("name") == key:
                     s["name"] = ""
+            d["sisdefman"] = 4
+        if d.get("sisdefman") == 4:
+            # Before version 5 a description template added a series line to the
+            # description of every series item; now that line is part of the items.
+            settings = d.get("settings") if isinstance(d.get("settings"), dict) else {}
+            per_series = {}
+            for key, s in (d.get("series") or {}).items():
+                if isinstance(s, dict) and s.get("description_template"):
+                    per_series[key] = s.pop("description_template")
+                elif isinstance(s, dict):
+                    s.pop("description_template", None)
+            lines = (settings.pop("description_template", "{description}\n\n{series_name} #{index}"), per_series)
             d["sisdefman"] = FORMAT_VERSION
         if d.get("sisdefman") != FORMAT_VERSION:
             raise ProjectError(f"unsupported project format version {d.get('sisdefman')!r}")
         if d.get("mode") not in MODES:
             raise ProjectError(f"mode must be one of {', '.join(MODES)} (got {d.get('mode')!r})")
         d.setdefault("settings", {})
-        d["settings"].setdefault("description_template", DEFAULT_DESCRIPTION_TEMPLATE)
         d["settings"].setdefault("dummy_item", copy.deepcopy(DEFAULT_DUMMY_ITEM))
         d.setdefault("series", {})
         d.setdefault("colors", {})
@@ -193,6 +209,7 @@ class Project:
                 for k in s[field]:
                     if not str(k).isdigit():
                         raise ProjectError(f"series {key!r}: {field} key {k!r} is not an itemdefid")
+        return lines
 
     # ------------------------------------------------------------ accessors
 
@@ -310,9 +327,6 @@ class Project:
 
     # ------------------------------------------------------ managed content
 
-    def description_template(self, key: str) -> str:
-        return self.get_series(key).get("description_template") or self.settings["description_template"]
-
     def series_name(self, key: str, mark_unnamed: bool = False) -> str:
         """The display name of a series. Without one, the key is shown in the
         GUI and command line; ``mark_unnamed`` returns a marker instead, so
@@ -396,38 +410,9 @@ class Project:
         return resolved, problems
 
     def resolve(self, record: dict) -> Tuple[dict, List[str]]:
-        """One record (which need not be saved) as a Steam definition without
-        series text."""
+        """One record (which need not be saved) as a Steam definition, before
+        generator rules and container lists."""
         return derive.resolve(self.schema(), record, self.series_positions().get(record["itemdefid"]))
-
-    def render_description(self, key: str, item: dict, info: SeriesInfo, record: Optional[dict] = None) -> str:
-        """The series description template applied to ``item`` (a resolved
-        definition) at position ``info``. ``record`` gives access to its
-        kind's fields."""
-        template = self.description_template(key)
-        base = item.get("description") or ""
-        values = dict(record or {})
-        values.update(item)
-        for name in ("description", "name", "tags"):
-            values.setdefault(name, "")
-        ctx = derive.Context(self.schema(), values, info)
-        text = ctx.render_rule(template, "description template")
-        for problem in ctx.problems:
-            if problem.startswith(("unknown field", "description template")):
-                raise ProjectError(
-                    f"description template {template!r}: {problem}; "
-                    f"available: {', '.join(TEMPLATE_FIELDS)}, and the item's own fields"
-                )
-        return text.strip() if not base.strip() else text
-
-    def template_affixes(self, key: str, item: dict, info: SeriesInfo) -> Tuple[str, str]:
-        """The text the template adds before and after the base description."""
-        sentinel = "\x00SISDEFMAN\x00"
-        text = self.render_description(key, dict(item, description=sentinel), info)
-        if sentinel not in text:
-            return "", ""
-        before, _, after = text.partition(sentinel)
-        return before, after
 
     def _resolved_members(self, key: str, resolved: Optional[Dict[int, dict]]) -> List[dict]:
         if resolved is None:
@@ -481,12 +466,8 @@ class Project:
     def build_with_problems(self) -> Tuple[List[dict], Dict[int, List[str]]]:
         positions = self.series_positions(mark_unnamed=True)
         out, problems = self.resolve_all(positions)
-        records = self.by_id()
         for key, s in self.series.items():
             members = self.members(key)
-            for m in members:
-                i = m["itemdefid"]
-                out[i]["description"] = self.render_description(key, out[i], positions[i], records[i])
             resolved_members = {m["itemdefid"]: out[m["itemdefid"]] for m in members}
             for gid, rule in self.generator_rules(key):
                 if gid in out:
@@ -500,6 +481,9 @@ class Project:
                       "{contents_secret}": "\n".join(n for is_secret, n in names if is_secret),
                       "{count}": str(count), "{count_no_secret}": str(count - secret),
                       "{count_secret}": str(secret), "{series_name}": self.series_name(key, True)}
+            for short in ("count", "count_no_secret", "count_secret"):  # the same as in other templates
+                tokens["{series.%s}" % short] = tokens["{%s}" % short]
+            tokens["{series.name}"] = tokens["{series_name}"]
             for cid in self.container_ids(key):
                 c = out.get(cid)
                 text = (c or {}).get("description")

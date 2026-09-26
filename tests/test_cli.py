@@ -45,7 +45,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         items = self.exported()
         self.assertEqual(len(items), len(fixtures.all_items()))
-        self.assertTrue(items[110]["description"].endswith("Test Series #1"))
+        self.assertEqual(items[110]["description"], "Applies the Red appearance to the Pistol.")  # nothing added
         with open(self.export_path, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["appid"], fixtures.APPID)
 
@@ -121,16 +121,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("already belongs to series 'crate1'", out)
         code, out = self.run_cli("add", "crate2", "--set", "name=Two | One")
         self.assertEqual(code, 0, out)
-        code, out = self.run_cli("series", "set", "crate2", "--template", "{name}\\n{series_name} {index}/{count}")
+        code, out = self.run_cli("set", "210", "description={name} ({series.name} {series.index}/{series.count})")
         self.assertEqual(code, 0, out)
         code, out = self.run_cli("show", "210")
-        self.assertIn('"description": "Two | One\\nSecond Series 1/1"', out)
+        self.assertIn('"description": "Two | One (Second Series 1/1)"', out)
         code, out = self.run_cli("series", "set", "crate2", "--last-id", "300")
         self.assertEqual(code, 0, out)
         code, out = self.run_cli("series")
         self.assertIn("IDs 210-300", out)
 
     def test_diff_against_file(self):
+        self.run_cli("set", "110", "description=Changed.")
         code, out = self.run_cli("diff", "--against", self.files[0], "-v")
         self.assertEqual(code, 0, out)
         self.assertIn("~ 110  Pistol | Red: description", out)
@@ -140,11 +141,11 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("check")
         self.assertEqual(code, 0, out)
         code, out = self.run_cli("template", "{description} ({series_name} no. {index:02d})")
-        self.assertEqual(code, 0, out)
-        self.assertIn("(Test Series no. 01)", out)
-        code, out = self.run_cli("template", "{nope}")
-        self.assertEqual(code, 1)
-        self.assertIn("unknown field", out)
+        self.assertEqual(code, 1)  # the setting is gone
+        self.assertIn("{series.name} #{series.index}", out)
+        self.run_cli("set", "110", "description=Red. ({series.name} no. {series.index:02d})")
+        code, out = self.run_cli("show", "110")
+        self.assertIn("Red. (Test Series no. 01)", out)
 
     def test_errors_are_reported(self):
         code, out = self.run_cli("show", "4242")

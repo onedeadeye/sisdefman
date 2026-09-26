@@ -42,6 +42,8 @@ class SeriesNameTests(unittest.TestCase):
         project, report = importer.import_files([write(self.dir, "c.json", self.unnamed_crate_file())])
         self.assertEqual(project.series["crate1"]["name"], "")
         self.assertTrue(any("no display name found" in text for _, text in report.lines))
+        self.assertEqual(errors(project), [])  # nothing shows the name yet
+        fixtures.add_series_lines(project)
         self.assertEqual(errors(project), [
             "error: series 'crate1' has no display name, so the text of 110-117 would show its key 'crate1'. "
             "Set one on the Series setup page or with `sisdefman series set crate1 --name NAME`."])
@@ -53,7 +55,6 @@ class SeriesNameTests(unittest.TestCase):
 
     def test_name_used_by_a_kind_or_a_crate_is_caught_too(self):
         project, _ = importer.import_files([write(self.dir, "c.json", self.unnamed_crate_file())])
-        project.settings["description_template"] = "{description}"
         self.assertEqual(errors(project), [])
         self.assertIn("note: series 'crate1' has no display name (none of its text uses it yet)",
                       [str(i) for i in check.check_project(project)])
@@ -70,35 +71,41 @@ class SeriesNameTests(unittest.TestCase):
     def test_name_comes_from_existing_series_lines(self):
         project, _ = importer.import_files([write(self.dir, "c.json", self.unnamed_crate_file())])
         project.series["crate1"]["name"] = "Test Series"
+        fixtures.add_series_lines(project)
         exported = write(self.dir, "export.json", project.export_document())
         again, report = importer.import_files([exported])
         self.assertEqual(again.series["crate1"]["name"], "Test Series")
-        self.assertEqual(again.item(110)["description"], "Applies the Red appearance to the Pistol.")
+        self.assertEqual(again.item(110)["description"],
+                         "Applies the Red appearance to the Pistol.\n\n{series.name} #{series.index}")
         self.assertEqual(again.build(), project.build())
 
     def test_key_in_series_lines_is_not_taken_as_the_name(self):
         project, _ = importer.import_files([write(self.dir, "c.json", self.unnamed_crate_file())])
+        fixtures.add_series_lines(project)
         exported = write(self.dir, "export.json", project.export_document())  # lines say "crate1 #1"
         again, report = importer.import_files([exported])
         self.assertEqual(again.series["crate1"]["name"], "")
         self.assertTrue(any("show the key 'crate1' instead" in text for _, text in report.lines))
-        self.assertEqual(again.item(110)["description"], "Applies the Red appearance to the Pistol.")
+        # The line still becomes a reference: once the series has a name, it shows it.
+        self.assertEqual(again.item(110)["description"],
+                         "Applies the Red appearance to the Pistol.\n\n{series.name} #{series.index}")
+        self.assertEqual(len(errors(again)), 1)
+        again.series["crate1"]["name"] = "Test Series"
+        built = {it["itemdefid"]: it for it in again.build()}
+        self.assertTrue(built[110]["description"].endswith("\n\nTest Series #1"))
 
-    def test_series_lines_of_another_template_are_recognised(self):
+    def test_series_lines_become_references(self):
         project, _ = importer.import_files(fixtures.write_files(self.dir))
-        project.settings["description_template"] = "{description}\n\n{series_name} #{index:02d}/{count_no_secret}"
+        for m in project.members("crate1"):
+            m["description"] += "\n\n{series.name} #{series.index:02d}/{series.count_no_secret}"
         exported = write(self.dir, "export.json", project.export_document())
         self.assertTrue(project.build()[8]["description"].endswith("Test Series #01/6"))
-        again, report = importer.import_files([exported])
-        self.assertEqual(again.settings["description_template"], project.settings["description_template"])
-        self.assertEqual(again.item(110)["description"], "Applies the Red appearance to the Pistol.")
-        self.assertEqual(again.build(), project.build())
-        # Merging into a project with another template sets the series' own template.
-        base = Project.new(fixtures.APPID)
-        merged, _ = importer.import_files([exported], base)
-        self.assertEqual(merged.series["crate1"]["description_template"],
-                         project.settings["description_template"])
-        self.assertEqual(merged.build(), project.build())
+        for base in (None, Project.new(fixtures.APPID)):  # a new project, or added to one
+            again, report = importer.import_files([exported], base)
+            self.assertEqual(again.item(110)["description"], "Applies the Red appearance to the Pistol.\n\n"
+                                                             "{series.name} #{series.index:02d}/{series.count_no_secret}")
+            self.assertEqual(again.build(), project.build())
+            self.assertTrue(any("stays right when items are renumbered" in text for _, text in report.lines))
 
     def test_new_series_need_a_name(self):
         project, _ = importer.import_files(fixtures.write_files(self.dir))

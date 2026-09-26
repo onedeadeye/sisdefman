@@ -111,8 +111,7 @@ class AdoptTests(unittest.TestCase):
         self.project.tables["weapon"]["rows"]["pistol"]["name"] = "Handgun"
         built = {it["itemdefid"]: it for it in self.project.build()}
         self.assertEqual(built[110]["name"], "Handgun | Red")
-        self.assertEqual(built[110]["description"],
-                         "Applies the Red appearance to the Handgun.\n\nPainted red.\n\nTest Series #1")
+        self.assertEqual(built[110]["description"], "Applies the Red appearance to the Handgun.\n\nPainted red.")
         self.assertIn("Handgun | Red", built[1]["description"])  # the crate list follows too
 
     def test_new_kind_items_get_series_tags_from_the_rule(self):
@@ -182,8 +181,8 @@ class SeriesCountTests(unittest.TestCase):
         self.assertEqual(self.project.secret_ids("crate1"), [116, 117])
         info = self.project.series_positions()[110]
         self.assertEqual((info.count, info.count_no_secret, info.count_secret), (8, 6, 2))
-        self.project.settings["description_template"] = \
-            "{description}\n\n#{index} of {count_no_secret} (+{count_secret}; {series.count} in all)"
+        self.project.item(110)["description"] = \
+            "Red.\n\n#{series.index} of {series.count_no_secret} (+{series.count_secret}; {series.count} in all)"
         self.assertTrue(self.built()[110]["description"].endswith("#1 of 6 (+2; 8 in all)"))
 
     def test_explicit_secret_rule_and_kind_templates(self):

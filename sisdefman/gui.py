@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, launcher, ops, safety, steam, tableimport, ui
+from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, launcher, migrate, ops, safety, steam, tableimport, ui
 from .project import DEFAULT_DUMMY_ITEM, MODES, Project, ProjectError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -65,6 +65,21 @@ class App:
         self.token = secrets.token_urlsafe(24)
         self.undo_stack: List[Tuple[str, str]] = []
         self.shutdown: Optional[Callable[[], None]] = None  # set by make_server
+        self.notice: Optional[dict] = None  # shown once in the page, e.g. after upgrading the file
+        if self.path and os.path.isfile(self.path):
+            self._upgrade(self.path)
+
+    def _upgrade(self, path: str) -> None:
+        """Upgrade an older project file on opening it (keeping the old one)."""
+        try:
+            project = Project.load(path)
+        except ProjectError:
+            return  # reported when it is used
+        if project.upgraded_from is not None:
+            old = project.upgraded_from
+            backup = migrate.save_upgrade(project)
+            self.notice = {"title": f"Project upgraded from format {old}",
+                           "lines": project.upgrade_notes + [f"The old file is kept as {os.path.basename(backup)}."]}
 
     # ------------------------------------------------------------ plumbing
 
@@ -78,6 +93,8 @@ class App:
             path = launcher.check_project(path)
             self.path = path
             self.undo_stack = []
+            self.notice = None
+            self._upgrade(path)
             launcher.remember(path)
             return {"path": path}
 
@@ -144,6 +161,7 @@ class App:
         live_info = project.live
         return {
             "open": True,
+            "notice": self.notice,
             "version": __version__,
             "path": self.path,
             "file": os.path.basename(self.path),
@@ -200,9 +218,9 @@ class App:
                 while slot in skip:
                     slot += 1
                 record["itemdefid"] = slot
-            info = project.series_info(key, position, len(ids) + 1)
+            info = project.series_info(key, position, len(ids) + 1, mark_unnamed=True)
         else:
-            info = project.series_positions().get(record["itemdefid"])
+            info = project.series_positions(mark_unnamed=True).get(record["itemdefid"])
         schema = project.schema()
         item, problems = derive.resolve(schema, record, info)
         kind = schema.kind_of(record)
@@ -210,11 +228,8 @@ class App:
         fields = derive.fields_of(kind)
         bare = {k: v for k, v in record.items() if k not in rules or k in fields}
         by_rule = derive.resolve(schema, bare, info)[0] if kind else {}
-        if info is not None:
-            try:
-                item["description"] = project.render_description(info.key, item, info, record)
-            except ProjectError as e:
-                problems.append(str(e))
+        project.unmark_names(by_rule)
+        problems.extend(project.unmark_names(item))
         problems.extend(project.resolve_colors(item))
         return {"item": item, "problems": problems, "rules": {f: by_rule.get(f) for f in rules},
                 "overrides": derive.overridden(schema, record)}
@@ -540,6 +555,9 @@ def _save_table(project: Project, body: dict):
     for column in table.get("columns", []):
         if not isinstance(column, str) or not column.isidentifier():
             raise ProjectError(f"invalid column name {column!r}")
+    for old_column, new_column in (body.get("column_renames") or {}).items():
+        if old_column != new_column and new_column in table.get("columns", []):
+            edits.rename_column(project, name, old_column, new_column)
     keys = list((table.get("rows") or {}).keys())
     if any(not str(k).strip() for k in keys):
         raise ProjectError("row keys cannot be empty")
@@ -572,17 +590,14 @@ def _delete_kind(project: Project, body: dict):
 
 
 def _save_settings(project: Project, body: dict):
-    if "description_template" in body:
-        template = body["description_template"]
-        if not isinstance(template, (str, list)) or not template:
-            raise ProjectError("the description template cannot be empty")
-        project.settings["description_template"] = template
+    if body.get("description_template"):
+        raise ProjectError("the series line setting was removed: write the line into a kind's description rule or the item's description, e.g. {series.name} #{series.index}")
     if "dummy_item" in body:
         dummy = body["dummy_item"]
         if not isinstance(dummy, dict) or not isinstance(dummy.get("name"), str) or not dummy["name"]:
             raise ProjectError("the dummy item needs a name")
         project.settings["dummy_item"] = dummy
-    project.build()  # validates the template
+    project.build()  # validates it
 
 
 # ---------------------------------------------------------------- server

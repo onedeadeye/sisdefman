@@ -42,7 +42,7 @@ def check_project(project: Project) -> List[Issue]:
         issues.append(Issue(level, text, itemdefid))
 
     for problem in derive.check_definitions(project.schema()) + colors.check_palette(project.colors):
-        add("error", problem)
+        add("warning" if derive.is_harmless(problem) else "error", problem)
     try:
         built, problems = project.build_with_problems()
     except (ProjectError, steam.SyntaxProblem) as e:
@@ -283,12 +283,6 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
     """Internal identifiers that would reach players: series keys and table
     row keys used in templates for visible text, and placeholders or colour
     keywords left in the exported text."""
-    templates = [("the description template", project.settings.get("description_template"))]
-    templates += [(f"series {key!r}: its description template", s.get("description_template"))
-                  for key, s in project.series.items() if s.get("description_template")]
-    for label, template in templates:
-        if "series" in _paths(template):
-            add("warning", f"{label} uses {{series}}, the series' key; use {{series_name}} for its display name")
     for kname, kind in project.kinds.items():
         if not isinstance(kind, dict):
             continue

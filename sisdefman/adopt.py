@@ -104,17 +104,19 @@ def invert(rule, value, ctx: Context) -> Optional[Dict[str, str]]:
         return _invert_one(rule, value, ctx)
     if not isinstance(rule, list) or not all(isinstance(p, str) for p in rule):
         return None
-    # A paragraph made only of placeholders renders empty when they are
-    # empty, and is then dropped.
+    # A paragraph is left out when a value it uses is empty, so any paragraph
+    # with a placeholder may be missing from the value.
     optional = []
     for n, p in enumerate(rule):
         try:
-            if all(not lit.strip() for lit, _, _, _ in _FORMATTER.parse(p)):
+            if any(path is not None for _, path, _, _ in _FORMATTER.parse(p)):
                 optional.append(n)
         except ValueError:
             return None
+    literal = {n: sum(len(lit.strip()) for lit, _, _, _ in _FORMATTER.parse(rule[n])) for n in optional}
     for size in range(len(optional) + 1):
-        for omit in itertools.combinations(optional, size):
+        # Leave out paragraphs with the least fixed text first ({flavor} before "Applies {finish}.").
+        for omit in sorted(itertools.combinations(optional, size), key=lambda c: sum(literal[n] for n in c)):
             kept = [p for n, p in enumerate(rule) if n not in omit]
             found = _invert_one("\n\n".join(kept), value, ctx) if kept else ({} if value == "" else None)
             if found is None:
@@ -135,7 +137,7 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
     kind = project.kinds.get(kind_name)
     if kind is None:
         raise ProjectError(f"no kind named {kind_name!r} (known: {', '.join(project.kinds) or 'none'})")
-    problems = derive.check_definitions(project.schema())
+    problems = derive.schema_errors(project.schema())
     if problems:
         raise ProjectError("fix the schema first: " + "; ".join(problems))
     result = AdoptResult(kind_name)
@@ -215,12 +217,14 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
             return True
         return False
 
+    # Stored values as they are exported (references filled in).
+    shown_all = {i: derive.resolve(project.schema(), records[i], positions.get(i))[0] for i in active}
     changed = True
     while changed:
         changed = False
         for i in active:
             for name, rule in rules.items():
-                stored = records[i].get(name)
+                stored = shown_all[i].get(name)
                 if not isinstance(stored, str) or not isinstance(rule, (str, list)):
                     continue
                 # The item's other stored values (its tags, say) count as known.
@@ -242,7 +246,7 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
         extras = {k: copy.deepcopy(v) for k, v in rec.items()
                   if k not in new and k not in rules and k not in fields and k != "kind"}
         trial, _ = derive.resolve(schema, {**new, **extras}, positions.get(i))
-        shown, _ = derive.resolve(schema, rec, positions.get(i))  # stored values with references filled in
+        shown = shown_all[i]
         for name in rules:
             if name in rec and name not in fields and not same(shown.get(name), trial.get(name), name):
                 new[name] = copy.deepcopy(rec[name])

@@ -72,7 +72,7 @@ class DatabaseCommandTests(unittest.TestCase):
         code, out = self.cli("set", "110", "flavor=Painted red.")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.items()[110]["description"],
-                         "Applies the Red appearance to the Pistol.\n\nPainted red.\n\nTest Series #1")
+                         "Applies the Red appearance to the Pistol.\n\nPainted red.")
         code, out = self.cli("set", "110-111", "name_color=ffffff", "marketable:=false")
         self.assertIn("now overrides the skin rule", out)
         self.assertEqual(self.items()[111]["name_color"], "ffffff")

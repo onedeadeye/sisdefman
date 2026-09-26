@@ -93,7 +93,6 @@ def import_files(
         raise ProjectError(f"the files are for different apps: {', '.join(map(str, sorted(appids)))}")
     appid = next(iter(appids), None)
 
-    fresh = project is None
     if project is None:
         project = Project.new(appid)
     else:
@@ -126,8 +125,7 @@ def import_files(
 
     _absorb_series_dummies(project, report)
     _find_series_names(project, [k for k in tags if k in project.series], report)
-    _adopt_series_lines(project, [k for k in tags if k in project.series], set(origin), fresh, report)
-    _strip_series_affixes(project, set(origin), report)
+    _link_series_lines(project, [k for k in tags if k in project.series], set(origin), report)
     project.normalize()
     return project, report
 
@@ -393,7 +391,6 @@ def _find_series_names(project: Project, keys: List[str], report: Report) -> Non
     """Give series without a display name the one their items' series lines
     already show ("... Promo Pack #3"). The key itself never counts: text
     showing it is the mistake this avoids."""
-    positions = project.series_positions(mark_unnamed=True)
     for key in keys:
         if project.has_display_name(key):
             continue
@@ -401,13 +398,7 @@ def _find_series_names(project: Project, keys: List[str], report: Report) -> Non
         found = []
         for index, m in enumerate(members, 1):
             desc = m.get("description") or ""
-            _, after = project.template_affixes(key, m, positions[m["itemdefid"]])
-            pattern = None
-            if "\ue000" in after:
-                pattern = re.escape(after).replace(re.escape(project.series_name(key, True)), "(.+?)") + "$"
-            m_ = re.search(pattern, desc) if pattern else None
-            if m_ is None:  # a series line written another way: "... Name #3" as the last paragraph
-                m_ = re.search(r"(?:^|\n)([^\n#]+?)\s+#0*" + str(index) + r"\b[^\n]*$", desc)
+            m_ = re.search(r"(?:^|\n)([^\n#]+?)\s+#0*" + str(index) + r"\b[^\n]*$", desc)
             if m_:
                 found.append(m_.group(1).strip())
         names = set(found)
@@ -421,14 +412,14 @@ def _find_series_names(project: Project, keys: List[str], report: Report) -> Non
 
 
 def _line_templates(project: Project, key: str, imported: set) -> Optional[set]:
-    """The series-line templates that describe how the imported items of a
-    series already end ("\\n\\nFirst Series #3/15"), or None."""
-    if not project.has_display_name(key):
-        return None
+    """The ways to write, with references, the series line the imported
+    items of a series end with ("First Series #3/15" ->
+    "{series.name} #{series.index}/{series.count_no_secret}"), or None. A
+    series without a display name matches lines that show its key."""
     name = project.series_name(key)
     members = project.members(key)
     count, secret = len(members), len(project.secret_ids(key))
-    values = {"count": count, "count_no_secret": count - secret, "count_secret": secret}
+    values = {"series.count": count, "series.count_no_secret": count - secret, "series.count_secret": secret}
     found = None
     for index, m in enumerate(members, 1):
         if m["itemdefid"] not in imported:
@@ -438,11 +429,11 @@ def _line_templates(project: Project, key: str, imported: set) -> Optional[set]:
         if not match or int(match.group(1)) != index:
             return None
         digits = match.group(1)
-        options = ["{description}\n\n{series_name} #" + (f"{{index:0{len(digits)}d}}" if digits[0] == "0" and
-                                                             len(digits) > 1 else "{index}")]
+        options = ["{series.name} #" + (f"{{series.index:0{len(digits)}d}}" if digits[0] == "0" and len(digits) > 1
+                                          else "{series.index}")]
         for n, part in enumerate(re.split(r"(\d+)", match.group(2))):
             if n % 2 == 0:
-                options = [o + part.replace("{", "{{").replace("}", "}}") for o in options]
+                options = [o + part for o in options]
             else:
                 tokens = [f"{{{k}}}" for k, v in values.items() if str(v) == part] or [part]
                 options = [o + t for o in options for t in tokens]
@@ -452,59 +443,26 @@ def _line_templates(project: Project, key: str, imported: set) -> Optional[set]:
     return found
 
 
-def _adopt_series_lines(project: Project, keys: List[str], imported: set, fresh: bool, report: Report) -> None:
-    """If imported items already end with a series line the description
-    template doesn't produce (an earlier export made with another template),
-    use a template that matches it, so the line is recognised and not added
-    a second time."""
-    positions = project.series_positions()
+def _link_series_lines(project: Project, keys: List[str], imported: set, report: Report) -> None:
+    """Imported items whose descriptions end with a series line written by
+    hand or by an earlier export ("First Series #8/15") get that line as
+    references, so it follows when items are renumbered."""
     matching = {}
     for key in keys:
-        members = [m for m in project.members(key) if m["itemdefid"] in imported]
-        if not members:
-            continue
-        m = members[0]
-        before, after = project.template_affixes(key, m, positions[m["itemdefid"]])
-        if (before or after) and (m.get("description") or "").endswith(after) and after.strip():
-            continue  # the current template already matches
         options = _line_templates(project, key, imported)
         if options:
             matching[key] = options
     if not matching:
         return
-    order = lambda t: (sum(c.isdigit() for c in t.replace("{index:0", "")), t)  # noqa: E731
-    common = set.intersection(*matching.values())
-    if fresh and common:
-        template = sorted(common, key=order)[0]
-        project.settings["description_template"] = template
-        report.info(f"description template set to {template!r}, matching the series lines already in the "
-                    "descriptions")
-        return
+    common = set.intersection(*matching.values())  # what the series agree on settles ambiguous counts
+    order = lambda t: (sum(c.isdigit() for c in t.replace("index:0", "")), t)  # noqa: E731
     for key, options in matching.items():
-        template = sorted(options, key=order)[0]
-        project.series[key]["description_template"] = template
-        report.info(f"series {key!r}: description template set to {template!r}, matching the series lines "
-                    "already in its descriptions")
-
-
-def _strip_series_affixes(project: Project, imported: set, report: Report) -> None:
-    """Remove series/index text a previous export added to descriptions."""
-    stripped = 0
-    positions = project.series_positions()
-    for key in project.series:
-        members = project.members(key)
-        for index, m in enumerate(members, 1):
-            if m["itemdefid"] not in imported:
-                continue
-            desc = m.get("description") or ""
-            before, after = project.template_affixes(key, m, positions[m["itemdefid"]])
-            if not (before or after):
-                continue
-            if desc == (before + after).strip():
-                m["description"] = ""
-                stripped += 1
-            elif len(desc) >= len(before) + len(after) and desc.startswith(before) and desc.endswith(after):
-                m["description"] = desc[len(before):len(desc) - len(after)]
-                stripped += 1
-    if stripped:
-        report.info(f"removed previously generated series text from {stripped} description(s)")
+        line = sorted(options & common or options, key=order)[0]
+        linked = 0
+        for m in project.members(key):
+            if m["itemdefid"] in imported:
+                body, sep, _ = (m.get("description") or "").rpartition("\n\n")
+                m["description"] = body + sep + line
+                linked += 1
+        report.info(f"series {key!r}: the series line in {linked} description(s) now reads {line!r}, so it "
+                    "stays right when items are renumbered")

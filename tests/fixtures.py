@@ -103,6 +103,17 @@ def extras_file():
     }
 
 
+# How items without a kind show their place in a series.
+SERIES_LINE = "{series.name} #{series.index}"
+
+
+def add_series_lines(project):
+    """Write a series line into the stored description of every series item."""
+    for key in project.series:
+        for m in project.members(key):
+            m["description"] = ((m.get("description") or "") + "\n\n" + SERIES_LINE).strip()
+
+
 def write_files(directory):
     paths = []
     for name, doc in (("crate.json", crate_file()), ("extras.json", extras_file())):

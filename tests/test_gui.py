@@ -77,7 +77,7 @@ class GuiServerTests(unittest.TestCase):
         record["flavor"] = "Painted red."
         status, data = self.post("preview", {"record": record})
         self.assertEqual(data["result"]["item"]["description"],
-                         "Applies the Red appearance to the Pistol.\n\nPainted red.\n\nTest Series #1")
+                         "Applies the Red appearance to the Pistol.\n\nPainted red.")
         self.assertEqual(data["result"]["rules"]["name"], "Pistol | Red")
         status, _ = self.post("item/save", {"record": record})
         self.assertEqual(status, 200)
@@ -91,6 +91,9 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(self.project().kinds["skin"]["derive"]["name"], "{weapon.name} | {finish}")
 
         # A new item is previewed with the ID and series position it will get.
+        kind = self.project().kinds["skin"]
+        kind["derive"]["description"].append("{series.name} #{series.index}")  # the series line
+        self.assertEqual(self.post("kind/save", {"name": "skin", "old_name": "skin", "kind": kind})[0], 200)
         new = {"kind": "skin", "weapon": "rifle", "finish": "Gold", "rarity": "common"}
         status, data = self.post("preview", {"record": new, "series": "crate1"})
         item = data["result"]["item"]
@@ -142,10 +145,11 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(self.project().series["crate1"]["last_id"], 150)
         status, data = self.post("series/save", {"key": "crate1", "config": {"last_id": 115}})
         self.assertEqual(status, 400)
-        status, _ = self.post("settings/save", {"description_template": "{description} ({index})"})
-        self.assertEqual(status, 200)
-        status, data = self.post("settings/save", {"description_template": "{nope}"})
-        self.assertEqual(status, 400)
+        status, data = self.post("settings/save", {"description_template": "{description} ({index})"})
+        self.assertEqual(status, 400)  # the setting is gone
+        self.assertIn("{series.name} #{series.index}", data["error"])
+        dummy = dict(self.project().settings["dummy_item"], name="Unused #{itemdefid}")
+        self.assertEqual(self.post("settings/save", {"dummy_item": dummy})[0], 200)
 
     def test_table_csv_import(self):
         status, data = self.post("table/csv-preview", {"csv": fixtures.WEAPON_CSV})
@@ -219,6 +223,35 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(self.post("series/order", {"order": ["nope"]})[0], 400)
         self.assertEqual(self.post("series/save", {"key": "x", "config": {"first_id": 70, "last_id": 80},
                                                    "is_new": True})[0], 400)  # no display name
+
+    def test_stray_table_values_are_harmless_and_dropped_on_save(self):
+        project = self.project()
+        project.tables["rarity"]["rows"] = {"common": {"color": "d2d2d2", "column3": "C"}}
+        project.save()
+        state = self.call("GET", "/api/state")[1]["result"]
+        stray = [i for i in state["issues"] if "column3" in i["text"]]
+        self.assertEqual([i["level"] for i in stray], ["warning"])
+        kind = self.project().kinds["skin"]
+        self.assertEqual(self.post("kind/save", {"name": "skin", "old_name": "skin", "kind": kind})[0], 200)
+        table = {"columns": ["color"], "rows": {"common": {"color": "d2d2d2", "column3": "C"}}}
+        self.post("table/save", {"name": "rarity", "old_name": "rarity", "table": table})
+        self.assertEqual(self.project().tables["rarity"]["rows"]["common"], {"color": "d2d2d2"})
+
+    def test_renaming_a_column_updates_the_templates(self):
+        self.post("items/adopt", {"kind": "skin", "ids": list(range(110, 118))})
+        self.assertEqual(self.project().kinds["skin"]["derive"]["name_color"], "{rarity.color}")
+        project = self.project()
+        project.item(999999).update(description="Common is {rarity.color:>8}.", rarity="common")  # stored
+        project.save()
+        table = self.project().tables["rarity"]
+        table = {"columns": ["hex"], "rows": {k: {"hex": v["color"]} for k, v in table["rows"].items()}}
+        status, _ = self.post("table/save", {"name": "rarity", "old_name": "rarity", "table": table,
+                                             "column_renames": {"color": "hex"}})
+        self.assertEqual(status, 200)
+        project = self.project()
+        self.assertEqual(project.kinds["skin"]["derive"]["name_color"], "{rarity.hex}")
+        self.assertEqual(project.item(999999)["description"], "Common is {rarity.hex:>8}.")
+        self.assertEqual([i for i in self.call("GET", "/api/state")[1]["result"]["issues"] if i["level"] != "note"], [])
 
     def test_schema_import(self):
         schema = {"tables": {"visuals": {"columns": ["label"], "rows": {"palette": {"label": "Colorway"}}}},

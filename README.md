@@ -8,9 +8,9 @@ the command line, and it exports one Steam-ready JSON file.
   skin could be defined by its weapon, finish, material ID, rarity and flavor text.
   sisdefman then builds the name, description, icon URLs, colours and tags from those
   fields and from lookup tables (weapon → display name).
-- **Series numbering.** Each item's series name and position go into its description
-  (`First Series #8`). The text stays correct when items are added, inserted, moved or
-  removed.
+- **Series numbering.** An item's series name and position can go into its description
+  (`First Series #8`, written `{series.name} #{series.index}`). The text stays correct when
+  items are added, inserted, moved or removed. Projects that don't use series never see it.
 - **Insertion in the middle of a series.** Later items are renumbered. Every reference to
   them (`bundle`, `exchange`, `tag_generators`), rarity generators and crate item lists are
   kept up to date.
@@ -90,13 +90,16 @@ project. The list of recent projects is kept in `recent.json` in your settings f
 - **Series actions.** Add an item at the end or at a chosen position, duplicate, move or
   remove items.
 - **Item kinds and Lookup tables.** Edit the rules and tables. Previews update as you type.
+  Renaming a table column updates the templates that read it (`{rarity.abbreviation}` →
+  `{rarity.abbr}`); values stored under a name the table doesn't list are shown as a column
+  so they can be kept or removed.
   **Import schema…** and **Export schema** on the Item kinds page load and save tables and
   kinds as a file (the same format as `sisdefman schema import/export`).
   **Import CSV…** brings in reference data such as an Unreal DataTable export (below).
 - **Colors.** The colour palette, with swatches, the number of values using each colour and
   **Convert existing colours…** (see [Colours](#colours)).
-- **Series setup.** Set each series' ID range, display name, description template, crates
-  and generators. **+ New series** (also in the sidebar) creates a series, empty or as a
+- **Series setup.** Set each series' ID range, display name, secret rares, crates and
+  generators. **+ New series** (also in the sidebar) creates a series, empty or as a
   copy of another one's setup (see [Creating a series](#creating-a-series)). The arrows
   next to each series change the order they are listed in; **Sort by first ID** appears
   when they are out of order.
@@ -104,7 +107,7 @@ project. The list of recent projects is kept in `recent.json` in your settings f
   - Switch between prerelease and release mode.
   - Record the live baseline.
   - Export, and import more Steam files.
-  - Edit the series line and the dummy item.
+  - Edit the dummy item.
   - Open another project, or quit.
 - **Check.** Lists problems, each linked to its item.
 - **Undo.** Covers every change made in the GUI to the open project; switching projects
@@ -138,7 +141,8 @@ and a template reads that row's columns.
                 "type": "item",
                 "name": "{weapon.name} | {finish}",
                 "display_type": "{rarity.name} {weapon.class} Weapon",
-                "description": ["Applies the {finish} appearance to the {weapon.name}.", "{flavor}"],
+                "description": ["Applies the {finish} appearance to the {weapon.name}.", "{flavor}",
+                                "{series.name} #{series.index}"],
                 "name_color": "{rarity.color}",
                 "icon_url": "https://example.com/{weapon}_{mat_id}_small.png",
                 "icon_url_large": "https://example.com/{weapon}_{mat_id}.png",
@@ -172,8 +176,9 @@ every skin of that weapon follows.
   above.
 - **Rules:**
   - A **template** string.
-  - A **list of templates**, one per paragraph. Empty paragraphs are dropped and the rest
-    are joined with a blank line.
+  - A **list of templates**, one per paragraph, joined with a blank line. A paragraph is
+    left out when any value it uses is empty: an empty `{flavor}`, or a series line
+    (`{series.name} #{series.index}`) for an item in no series.
   - Any other JSON value (`true`, a number), which is exported as it is.
 
   Items of a kind are exported with their fields in the usual Steam order (`itemdefid`,
@@ -207,7 +212,7 @@ sisdefman set 117 "flavor=Found in the jungle. Still warm."
 ```
 
 Items without flavor text keep a description without the extra paragraph. The series line
-still comes last:
+paragraph comes last:
 
 ```text
 Applies the Camo appearance to the Rifle.
@@ -398,16 +403,15 @@ From definitions laid out like the table below, `import` sets up the following:
 | Dummy items at 135-143 | IDs the series has used (`allocated_through: 143`), still exported as dummies |
 | The next unrelated ID, 197 | the end of the series' range (`last_id: 196`), but no further than the end of its block of IDs (5001-5006 get room up to 5099) |
 | `Contains ... from the First Series.` in crate 1, or series lines already in the items' descriptions (`First Series #8`) | the display name `First Series` |
+| Series lines at the end of the items' descriptions (`First Series #8/15`) | the same text written with references (`{series.name} #{series.index}/{series.count_no_secret}`), so it follows renumbering |
 | The list of names in crate 1's description | `{contents}`, generated from every item not tagged `rarity:epic` |
 | Generators 101-104, whose bundles hold exactly one rarity | rules such as `rarity:common`, so new items join them automatically |
 
 If a crate's list is out of date, the import prints the difference.
 
-**Importing an earlier export.** Descriptions that already end with a series line
-(`First Series #8/15`) are recognised, even when that line was made with a different
-description template: the import switches to a template that produces the same line (the
-project's, or the series' own when adding to an existing project) and strips the line, so
-it isn't added twice.
+**Importing an earlier export.** Descriptions that end with a series line (`First Series
+#8/15`) keep it, written with references, so the export is the same and the numbers follow
+when items move. Nothing is added to descriptions that have no series line.
 
 **Display names.** A series' display name is what players read (`First Series #8`), and
 its key (`crate1`) is only for tags. When the import can't find a display name, the series
@@ -433,8 +437,7 @@ In release mode such a series is not set up automatically; create it with
 | What | Stored in the project as | Exported as |
 | --- | --- | --- |
 | Items of a kind | the kind's fields and any overrides | the kind's rules applied |
-| Descriptions of series items | the plain description (or the kind's rule) | the series line added (below) |
-| Descriptions of containers (crates) | text containing `{contents}` (or `{contents_no_secret}` / `{contents_secret}`) | the names of the series' items, one per line: `{contents}` leaves out items with an `exclude` tag, `{contents_no_secret}` leaves out the secret rares, `{contents_secret}` lists only the secret rares; `{count}`, `{count_no_secret}`, `{count_secret}` and `{series_name}` filled in |
+| Descriptions of containers (crates) | text containing `{contents}` (or `{contents_no_secret}` / `{contents_secret}`) | the names of the series' items, one per line: `{contents}` leaves out items with an `exclude` tag, `{contents_no_secret}` leaves out the secret rares, `{contents_secret}` lists only the secret rares; `{series.name}`, `{series.count}`, `{series.count_no_secret}` and `{series.count_secret}` filled in (also written `{series_name}`, `{count}`...) |
 | Bundles of the generators listed in a series' `generators` | a tag rule, e.g. `rarity:common` | every series item with that tag, in series order |
 | Unused IDs from `first_id` to `allocated_through` | nothing | dummy items built from `settings.dummy_item` |
 
@@ -442,36 +445,49 @@ Everything else is exported exactly as stored, including field order. Steam keep
 current definition for any itemdefid that an upload leaves out, so an ID a series stops
 using is exported as a dummy item instead of being dropped.
 
-### The series line
+### Series values in text
 
-The default is `{description}\n\n{series_name} #{index}`. Besides the item's own fields,
-the template can use:
+sisdefman never adds text to an item on its own. Where an item should show its place in a
+series, write it with these references, in a kind's rule or in the item's own fields:
 
-| Field | Value |
+| Reference | Value |
 | --- | --- |
-| `{description}` | the item's description (derived or stored) |
-| `{series_name}` / `{series}` | display name / key of the series |
-| `{index}` / `{count}` | position in the series / number of items in it (`{index:03d}` pads to 3 digits) |
-| `{count_no_secret}` / `{count_secret}` | number of items without the secret rares / number of secret rares |
-| `{name}` / `{itemdefid}` | the item's name / ID |
-| `{tags[rarity]}` | the value of one of the item's tags |
+| `{series.name}` | the series' display name |
+| `{series.index}` | the item's position (`{series.index:03d}` pads it to 3 digits) |
+| `{series.count}` | the number of items in the series |
+| `{series.count_no_secret}` / `{series.count_secret}` | the number without the secret rares / of secret rares |
+| `{series}` | the series' key (for tags, not for text players read) |
+
+For items of a kind, add the line to the kind's description rule as a paragraph of its own:
+
+```json
+"description": ["Applies the {finish} appearance to the {weapon.name}.", "{flavor}",
+                "{series.name} #{series.index}/{series.count_no_secret} ({rarity.abbreviation})"]
+```
+
+A paragraph is left out when a value it uses is empty, so the same kind works for items in
+no series. For an item without a kind, write the line into its description:
 
 ```sh
-sisdefman template '{description}\n\n{series_name} #{index}'   # \n is a line break
-sisdefman series set crate2 --template '{description}\n\n{series_name} - {index} of {count}'
-sisdefman series set crate2 --template ''                       # back to the global one
+sisdefman set 110 "description=Applies the Red appearance to the Pistol. ({series.name} #{series.index})"
 ```
+
+The import turns series lines already in descriptions into these references. Projects made
+with the old series line setting (format 4 and earlier) are converted when opened: the line
+becomes the last paragraph of each kind's description rule, or part of the stored
+description of items without a kind, and the export doesn't change. The old file is kept
+next to it (`sisdefman.v4.json`).
 
 ### Secret rares and item counts
 
 Each series knows which of its items are secret rares, so templates can count with or without
 them:
 
-| Property | Series line and crates | Kind templates |
-| --- | --- | --- |
-| every item, secret rares included | `{count}` | `{series.count}` |
-| items without the secret rares | `{count_no_secret}` | `{series.count_no_secret}` |
-| secret rares only | `{count_secret}` | `{series.count_secret}` |
+| Property | Reference |
+| --- | --- |
+| every item, secret rares included | `{series.count}` |
+| items without the secret rares | `{series.count_no_secret}` |
+| secret rares only | `{series.count_secret}` |
 
 By default the secret rares are the items the series' crate leaves out of its list (its
 `exclude` tags, e.g. `rarity:epic`). To set them explicitly, use
@@ -488,11 +504,11 @@ rares:
 | `{contents_secret}` | only the secret rares |
 
 ```text
-Contains one of {count_no_secret} appearances from the {series_name}.
+Contains one of {series.count_no_secret} appearances from the {series.name}.
 
 {contents_no_secret}
 
-...or one of {count_secret} Secret Rare Special Appearances!
+...or one of {series.count_secret} Secret Rare Special Appearances!
 ```
 
 ### Creating a series
@@ -526,7 +542,7 @@ setup, but none of its items:
     and `Second` → `Third` are worked out from the keys and names; add more with
     `--replace FIND=REPLACE`.
 - **What is set up:** the copied containers and generators become the new series'
-  containers and generators. Its description template and secret-rare rule are copied too.
+  containers and generators. Its secret-rare rule is copied too.
 
 Nothing that already exists changes, so this needs no confirmation in release mode. A
 definition outside the block that should also grant the new crate (a playtime drop, say) is
@@ -615,7 +631,6 @@ the next free one. Appending is always safe.
 | `table [show \| new \| set \| delete \| rename \| import]` | edit lookup tables; import CSV reference data |
 | `series [new \| set \| order]` | show, create (empty or `--copy-from` another series), configure (range, name, template, secret rares, containers, generators) or reorder series |
 | `colors [set \| rename \| delete \| convert]` | show or edit the colour palette; convert hex colours to it |
-| `template [TEXT]` | show or set the series line |
 | `mode [prerelease \| release]` / `mark-live` / `diff [--against FILE]` | release protection |
 
 ## What check looks for
@@ -626,10 +641,10 @@ the next free one. Appending is always safe.
   containers or generators that don't exist; a series without a display name whose text
   needs one.
 - **Warnings**, mostly things players would see:
-  - `{series}` (the key) in a series line, or a table key such as `{weapon}` in a kind's rule
-    for `name`, `description` or `display_type`, where `{series_name}` or `{weapon.name}`
+  - `{series}` (the key), or a table key such as `{weapon}`, in a `name`, `description` or
+    `display_type` (a kind's rule or an item's own), where `{series.name}` or `{weapon.name}`
     was probably meant;
-  - placeholders (`{series_name}`, `{contents}`) or colour keywords (`@rare`) left in exported text;
+  - placeholders (`{series.name}` outside a series, `{contents}`) or colour keywords (`@rare`) left in exported text;
   - an item whose colour, `tradable` or `marketable` differs from the other items with the
     same tag, when that tag decides it for nearly every item (a `rarity:rare` item in the
     common colour);
@@ -643,11 +658,10 @@ the next free one. Appending is always safe.
 
 ```jsonc
 {
-    "sisdefman": 4,
+    "sisdefman": 5,
     "appid": 480,
     "mode": "prerelease",
     "settings": {
-        "description_template": "{description}\n\n{series_name} #{index}",
         "dummy_item": { "type": "item", "name": "Dummy Item #{itemdefid}", "name_color": "@common", ... }
     },
     "colors": { "common": "d2d2d2", "background": "292929", ... },   // the palette (see above)
@@ -674,13 +688,15 @@ the next free one. Appending is always safe.
 
 - An item without a `kind` holds its Steam definition as it is.
 - An item with a `kind` holds the kind's fields plus any overrides.
-- Series items store their plain description, and crates store `{contents}` where the item
-  list goes.
+- Descriptions are stored as they are exported, with references such as
+  `{series.index}`; crates store `{contents}` where the item list goes.
 - Dummy items inside a series' range are not stored.
 - The project file can be edited by hand. `sisdefman check` reports mistakes.
-- Older project files (versions 1-3) are upgraded automatically. Earlier versions stored a
-  series' key as its name when it had none; those series now have no display name, and
-  `check` asks for one.
+- Older project files (versions 1-4) are upgraded when opened, and the old file is kept as
+  `NAME.vN.json`. Version 4 and earlier added a series line to every series item; it is now
+  written into the kinds and items (see [Series values in text](#series-values-in-text)).
+  Versions 1-3 stored a series' key as its name when it had none; those series now have no
+  display name, and `check` asks for one.
 
 ## Development
 

@@ -38,7 +38,7 @@ class ReferenceTests(unittest.TestCase):
         item = self.built(110)
         self.assertEqual(item["name"], "Handgun | Red")
         self.assertEqual(item["icon_url"], "https://example.com/pistol_red.png")  # the tag's own spelling
-        self.assertTrue(item["description"].endswith("Test Series #1"))
+        self.assertEqual(item["description"], "Applies the Red appearance to the Pistol.")
         self.assertEqual([i for i in self.issues() if "[110]" in i], [])
 
     def test_a_field_of_the_same_name_comes_before_the_tag(self):

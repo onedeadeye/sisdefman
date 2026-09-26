@@ -9,7 +9,7 @@ import os
 import sys
 from typing import List, Optional
 
-from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, ops, query, safety, steam, tableimport, ui
+from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, migrate, ops, query, safety, steam, tableimport, ui
 from .project import MODES, Project, ProjectError
 
 DEFAULT_PROJECT = "sisdefman.json"
@@ -21,7 +21,15 @@ def _project_path(args) -> str:
 
 
 def _load(args) -> Project:
-    return Project.load(_project_path(args))
+    project = Project.load(_project_path(args))
+    if project.upgraded_from is not None:
+        old = project.upgraded_from
+        backup = migrate.save_upgrade(project)
+        print(ui.yellow(f"Upgraded {os.path.basename(project.path)} from format {old} to {project.data['sisdefman']}"
+                        f" (the old file is kept as {os.path.basename(backup or '')})."), file=sys.stderr)
+        for note in project.upgrade_notes:
+            print("  " + note, file=sys.stderr)
+    return project
 
 
 def _unescape(text: str) -> str:
@@ -336,8 +344,6 @@ def cmd_series(args) -> int:
             print(ui.bold(f"{key}") + f"  {label}")
             print(f"    IDs {s['first_id']}-{s['last_id']}, {len(members)} items, "
                   f"used through {s.get('allocated_through')}")
-            if s.get("description_template"):
-                print(f"    description template: {s['description_template']!r}")
             for cid, cfg in s["containers"].items():
                 exclude = ", ".join((cfg or {}).get("exclude", [])) or "nothing"
                 print(f"    container {cid}: lists items, excluding {exclude}")
@@ -368,8 +374,6 @@ def cmd_series(args) -> int:
     elif args.last_id is not None:
         config["last_id"] = args.last_id
     s = project.series.get(args.key, {"containers": {}, "generators": {}})
-    if args.template is not None:
-        config["description_template"] = _unescape(args.template)
     if args.secret is not None:
         config["secret"] = args.secret
     if args.exclude and not args.container:
@@ -431,21 +435,11 @@ def _series_new_copy(args, project: Project, config: dict) -> int:
 
 
 def cmd_template(args) -> int:
-    project = _load(args)
-    if args.template is not None:
-        project.settings["description_template"] = _unescape(args.template)
-        project.build()  # validates the template
-        project.save()
-        print(ui.green("Saved description template."))
-    print(f"Description template: {project.settings['description_template']!r}")
-    for key in project.series:
-        members = project.members(key)
-        if members:
-            print(ui.dim(f"Example ({key} #1, itemdefid {members[0]['itemdefid']}):"))
-            print(project.render_description(key, project.resolve(members[0])[0],
-                                             project.series_positions()[members[0]["itemdefid"]], members[0]))
-            break
-    return 0
+    print("The series line setting was removed. A series line is now part of the items: write it into a "
+          "kind's description rule (as a paragraph) or an item's description with references such as "
+          "{series.name} #{series.index}/{series.count_no_secret}. Projects made before this change were "
+          "converted when opened.")
+    return 1
 
 
 # ------------------------------------------------------------ mode / live
@@ -900,7 +894,6 @@ def build_parser() -> argparse.ArgumentParser:
                             help=argparse.SUPPRESS)
         else:
             sp.add_argument("--last-id", type=int, help="last itemdefid the series may use")
-        sp.add_argument("--template", help="description template for this series (\"\" = use the global one)")
         sp.add_argument("--secret", metavar="TAGS",
                         help="tags that mark the series' secret rares, e.g. rarity:epic "
                              "(\"\" = the tags its containers leave out)")
@@ -921,8 +914,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--by-id", action="store_true", help="sort all series by their first itemdefid")
     sp.set_defaults(func=cmd_series)
 
-    p = command("template", "Show or set the description template used for series items.")
-    p.add_argument("template", nargs="?", help="new template; \\n is a line break")
+    p = command("template", "(removed) Series lines are written with {series.name} #{series.index} now.")
+    p.add_argument("template", nargs="?", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_template)
 
     p = command("mode", "Show or switch between prerelease and release mode.")

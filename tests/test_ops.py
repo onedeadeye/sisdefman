@@ -8,7 +8,8 @@ from tests import fixtures
 
 
 def new_skin(name, rarity="common"):
-    return {"type": "item", "name": name, "description": "New.", "tags": f"type:skin;rarity:{rarity}"}
+    return {"type": "item", "name": name, "description": "New.\n\n" + fixtures.SERIES_LINE,
+            "tags": f"type:skin;rarity:{rarity}"}
 
 
 class OpsTests(unittest.TestCase):
@@ -17,6 +18,7 @@ class OpsTests(unittest.TestCase):
         self.project, _ = importer.import_files(fixtures.write_files(self.tmp.name))
         # An ordinary bundle that names series items directly.
         self.project.items.append({"itemdefid": 500, "type": "bundle", "name": "Pack", "bundle": "113x2;117"})
+        fixtures.add_series_lines(self.project)
         self.project.normalize()
 
     def tearDown(self):

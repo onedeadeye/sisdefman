@@ -223,8 +223,53 @@ def replace_table(project: Project, name: str, table: dict, renames: Optional[Di
             if field_names_row(project, rec, name, old):
                 rec[name] = new
                 break
-    project.tables[name] = {"columns": list(table["columns"]),
-                            "rows": {str(k): dict(v) for k, v in table["rows"].items()}}
+    columns = list(table["columns"])
+    project.tables[name] = {"columns": columns,
+                            "rows": {str(k): {c: v for c, v in dict(row).items() if c in columns}
+                                     for k, row in table["rows"].items()}}
+
+
+def rename_column(project: Project, table: str, old: str, new: str) -> int:
+    """Rename a column in every template that reads it: {weapon.old} in kind
+    rules and defaults (through ref fields or the table's name) and in stored
+    item values. Returns the number of values changed. The table itself is
+    changed by the caller."""
+    heads = {table}
+    for kind in project.kinds.values():
+        heads.update(f for f, spec in derive.fields_of(kind).items()
+                     if isinstance(spec, dict) and spec.get("type") == "ref" and spec.get("table") == table)
+    pattern = re.compile(r"\{(" + "|".join(map(re.escape, sorted(heads))) + r")\." + re.escape(old) + r"(?=[}\[.:!])")
+
+    def fix(value):
+        if isinstance(value, str):
+            return pattern.sub(lambda m: "{" + m.group(1) + "." + new, value)
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        return value
+
+    count = 0
+
+    def update(container: dict, key) -> None:
+        nonlocal count
+        value = fix(container[key])
+        if value != container[key]:
+            container[key] = value
+            count += 1
+
+    for kind in project.kinds.values():
+        for rule in list(derive.rules_of(kind)):
+            update(kind["derive"], rule)
+        for spec in derive.fields_of(kind).values():
+            if isinstance(spec, dict) and "default" in spec:
+                update(spec, "default")
+    for rec in project.items:
+        for key in list(rec):
+            if key not in derive.STRUCTURAL_FIELDS:
+                update(rec, key)
+    dummy = project.settings.get("dummy_item") or {}
+    for key in list(dummy):
+        update(dummy, key)
+    return count
 
 
 def delete_table(project: Project, name: str) -> None:
@@ -259,7 +304,7 @@ def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str
                 rec["kind"] = name
     project.kinds[name] = {"fields": copy.deepcopy(kind.get("fields", {})),
                            "derive": copy.deepcopy(kind.get("derive", {}))}
-    problems = derive.check_definitions(project.schema())
+    problems = derive.schema_errors(project.schema())
     if problems:
         raise ProjectError("; ".join(problems))
 
@@ -300,7 +345,7 @@ def import_schema(project: Project, data: dict) -> List[str]:
         project.kinds[name] = copy.deepcopy(kind)
         notes.append(f"kind {name}: {len(derive.fields_of(kind))} field(s), "
                      f"{len(derive.rules_of(kind))} derived field(s)")
-    problems = derive.check_definitions(project.schema())
+    problems = derive.schema_errors(project.schema())
     if problems:
         raise ProjectError("; ".join(problems))
     return notes
@@ -311,8 +356,7 @@ def import_schema(project: Project, data: dict) -> List[str]:
 
 def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[str]:
     """Create or change a series' settings. ``config`` holds any of name,
-    first_id (new series only), last_id, description_template (None or "" to
-    use the global one), secret (tag rule(s) marking secret rares; None or ""
+    first_id (new series only), last_id, secret (tag rule(s) marking secret rares; None or ""
     to use the containers' exclude tags), containers and generators. Returns
     notes."""
     notes: List[str] = []
@@ -338,12 +382,8 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
         s["last_id"] = config["last_id"]
     if s["last_id"] < s["first_id"]:
         raise ProjectError("the last ID must not be before the first ID")
-    if "description_template" in config:
-        template = config["description_template"]
-        if template in (None, ""):
-            s.pop("description_template", None)
-        else:
-            s["description_template"] = template
+    if config.get("description_template"):
+        raise ProjectError("the series line setting was removed: write the line into a kind's description rule or the item's description, e.g. {series.name} #{series.index}")
     if "secret" in config:
         secret = config["secret"]
         if secret in (None, "") or secret == []:
@@ -650,8 +690,6 @@ def create_series(project: Project, key: str, config: dict, copy_setup: Optional
                                          for c, cfg in s["containers"].items() if int(c) in mapping})
         config.setdefault("generators", {str(mapping[int(g)]): rule
                                          for g, rule in s["generators"].items() if int(g) in mapping})
-        if "description_template" in s:
-            config.setdefault("description_template", s["description_template"])
         if "secret" in s:
             config.setdefault("secret", copy.deepcopy(s["secret"]))
     notes = save_series(project, key, config, is_new=True)

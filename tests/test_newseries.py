@@ -84,6 +84,7 @@ class NewSeriesTests(unittest.TestCase):
     def test_copied_series_fills_up_as_items_are_added(self):
         self.copy()
         item = fixtures.skin(210, "Pistol | Gold", "common", "pistol", series="crate2")
+        item["description"] += "\n\n" + fixtures.SERIES_LINE
         self.project.items.append(item)
         built = self.built()
         self.assertEqual(built[201]["bundle"], "210")

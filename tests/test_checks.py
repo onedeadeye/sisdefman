@@ -21,10 +21,10 @@ class VisibleTextTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_series_key_in_templates(self):
-        self.project.settings["description_template"] = "{description}\n\n{series} #{index}"
-        self.assertIn("warning: the description template uses {series}, the series' key; use {series_name} for "
-                      "its display name", issues(self.project))
+    def test_series_key_in_text(self):
+        self.project.item(110)["description"] = "Red.\n\n{series} #{series.index}"
+        self.assertIn("warning: [110] description uses {series}, the series' key; use {series.name} for its "
+                      "display name", issues(self.project))
 
     def test_table_key_in_a_kind_rule(self):
         self.project.data.update(fixtures.skin_schema())

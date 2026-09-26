@@ -6,8 +6,10 @@ A *kind* describes a family of similar items (for example weapon skins):
   ``flavor``...). They are stored in the item's record but not exported.
 * ``derive`` gives a rule for each Steam field the kind produces. A rule is a
   template string such as ``"{weapon.name} | {finish}"``, a list of template
-  strings (paragraphs: empty ones are dropped and the rest joined with a blank
-  line), or any other JSON value, which is used as-is.
+  strings (paragraphs, joined with a blank line; a paragraph is left out when
+  it comes out empty or any value it uses is empty, such as an empty
+  ``{flavor}`` or ``{series.index}`` for an item in no series), or any other
+  JSON value, which is used as-is.
 
 A *table* maps keys to rows of values. A field of type ``ref`` holds a key of
 a table, so ``{weapon}`` is the key (``pistol``) and ``{weapon.name}``
@@ -359,9 +361,28 @@ class Context:
         if isinstance(rule, str):
             return self.render(rule, label)
         if isinstance(rule, list):
-            parts = [self.render(p, label).strip() if isinstance(p, str) else str(p) for p in rule]
+            parts = [self.render_paragraph(p, label) if isinstance(p, str) else str(p) for p in rule]
             return "\n\n".join(p for p in parts if p)
         return copy.deepcopy(rule)
+
+    def render_paragraph(self, template: str, label: str) -> str:
+        """One paragraph of a paragraph rule: empty when any value it uses is."""
+        try:
+            segments = list(_FORMATTER.parse(template))
+        except ValueError as e:
+            self.problem(f"{label}: {_explain(e)}")
+            return ""
+        out = []
+        for literal, path, spec, conversion in segments:
+            out.append(literal)
+            if path is None:
+                continue
+            one = "{" + path + (f"!{conversion}" if conversion else "") + (f":{spec}" if spec else "") + "}"
+            value = self.render(one, label)
+            if value.strip() == "":
+                return ""
+            out.append(value)
+        return "".join(out).strip()
 
     def render(self, template: str, label: str) -> str:
         try:
@@ -437,6 +458,15 @@ def overridden(schema: Schema, record: dict) -> List[str]:
 # ----------------------------------------------------------- definitions
 
 
+def is_harmless(problem: str) -> bool:
+    """Problems with the definitions that don't affect any item."""
+    return "nothing uses them" in problem
+
+
+def schema_errors(schema: Schema) -> List[str]:
+    return [p for p in check_definitions(schema) if not is_harmless(p)]
+
+
 def check_definitions(schema: Schema) -> List[str]:
     """Problems with the tables and kinds themselves."""
     out = []
@@ -451,7 +481,9 @@ def check_definitions(schema: Schema) -> List[str]:
             else:
                 extra = [c for c in row if c not in t.get("columns", [])]
                 if extra:
-                    out.append(f"table {name!r}: row {key!r} has undeclared column(s) {', '.join(extra)}")
+                    out.append(f"table {name!r}: row {key!r} has values under {', '.join(extra)}, which "
+                               f"{'is not a column' if len(extra) == 1 else 'are not columns'} of the table "
+                               "(nothing uses them); remove them or add the column on the Lookup tables page")
     for name, kind in schema.kinds.items():
         if not isinstance(kind, dict) or not isinstance(kind.get("fields", {}), dict) \
                 or not isinstance(kind.get("derive", {}), dict):
