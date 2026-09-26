@@ -7,7 +7,7 @@ import unittest
 import unittest.mock
 
 from sisdefman import adopt, check, cli, colors, importer, ui
-from sisdefman.project import Project, ProjectError
+from sisdefman.project import FORMAT_VERSION, Project, ProjectError
 
 from tests import fixtures
 
@@ -91,7 +91,7 @@ class ColorTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f)
         loaded = Project.load(path)
-        self.assertEqual((loaded.data["sisdefman"], loaded.colors), (3, {}))
+        self.assertEqual((loaded.data["sisdefman"], loaded.colors), (FORMAT_VERSION, {}))
 
 
 class ColorCliTests(unittest.TestCase):

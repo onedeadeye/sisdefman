@@ -196,6 +196,14 @@ pre.json {
   border-bottom: 1px solid var(--border); background: none; cursor: pointer; text-align: left; }
 .list button:last-child { border-bottom: 0; }
 .list button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.list-row { display: flex; border-bottom: 1px solid var(--border); }
+.list-row button { border-bottom: 0; }
+.list-row button.grow { flex: 1; min-width: 0; }
+.list-row button.arrow { width: auto; padding: 7px 6px; color: var(--muted); }
+.list-row button.arrow:hover:not(:disabled) { color: var(--accent); }
+.list-row button.arrow:disabled { opacity: .3; cursor: default; }
+.list-row.active { background: var(--accent-soft); }
+.list-row.active button.grow { color: var(--accent); font-weight: 600; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
   margin-bottom: 14px; }
 .card h3 { margin: 0 0 8px; font-size: 15px; }

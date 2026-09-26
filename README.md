@@ -93,7 +93,9 @@ project. The list of recent projects is kept in `recent.json` in your settings f
   **Convert existing colours…** (see [Colours](#colours)).
 - **Series setup.** Set each series' ID range, display name, description template, crates
   and generators. **+ New series** (also in the sidebar) creates a series, empty or as a
-  copy of another one's setup (see [Creating a series](#creating-a-series)).
+  copy of another one's setup (see [Creating a series](#creating-a-series)). The arrows
+  next to each series change the order they are listed in; **Sort by first ID** appears
+  when they are out of order.
 - **Settings & export.**
   - Switch between prerelease and release mode.
   - Record the live baseline.
@@ -350,12 +352,25 @@ From definitions laid out like the table below, `import` sets up the following:
 | --- | --- |
 | Items tagged `series:crate1` at IDs 110-134 | series `crate1`, items #1-#25 |
 | Dummy items at 135-143 | IDs the series has used (`allocated_through: 143`), still exported as dummies |
-| The next unrelated ID, 197 | the end of the series' range (`last_id: 196`) |
-| `Contains ... from the First Series.` in crate 1 | the display name `First Series` |
+| The next unrelated ID, 197 | the end of the series' range (`last_id: 196`), but no further than the end of its block of IDs (5001-5006 get room up to 5099) |
+| `Contains ... from the First Series.` in crate 1, or series lines already in the items' descriptions (`First Series #8`) | the display name `First Series` |
 | The list of names in crate 1's description | `{contents}`, generated from every item not tagged `rarity:epic` |
 | Generators 101-104, whose bundles hold exactly one rarity | rules such as `rarity:common`, so new items join them automatically |
 
 If a crate's list is out of date, the import prints the difference.
+
+**Importing an earlier export.** Descriptions that already end with a series line
+(`First Series #8/15`) are recognised, even when that line was made with a different
+description template: the import switches to a template that produces the same line (the
+project's, or the series' own when adding to an existing project) and strips the line, so
+it isn't added twice.
+
+**Display names.** A series' display name is what players read (`First Series #8`), and
+its key (`crate1`) is only for tags. When the import can't find a display name, the series
+gets none, the import says so, and `check` reports an error for every text that would need
+it, so nothing can be exported until you set one (`sisdefman series set crate1 --name
+"First Series"`, or the Series setup page). The key is never shown instead. New series need
+a display name from the start.
 
 In prerelease mode the items of a series don't have to be consecutive. The import still
 sets up the series and warns about each discontinuity:
@@ -442,16 +457,22 @@ Contains one of {count_no_secret} appearances from the {series_name}.
 sisdefman series new crate3 --name "Third Series" --copy-from crate2 -n   # preview
 sisdefman series new crate3 --name "Third Series" --copy-from crate2
 sisdefman series new crate3 --name "Third Series" --first-id 310 --last-id 396   # empty
+sisdefman series order crate2 crate1    # list crate2 first (series not named keep their order after them)
+sisdefman series order --by-id          # sort all series by their first itemdefid
 ```
 
-The ID range defaults to the next block after the last series, of the same size (crate 2 at
-210-296 gives 310-396). With `--copy-from`, the new series gets a copy of the other series'
+New and imported series are placed in the list by their first ID; the order only affects
+how series are listed, never their IDs.
+
+The key and ID range default to the next ones after the last series of the largest family
+(crate1 … crate5 give crate6; crate 5 at 510-596 gives 610-696). With `--copy-from`, the new series gets a copy of the other series'
 setup, but none of its items:
 
 - **What is copied:** its containers and generators, and the other definitions in its ID
-  block (e.g. 200-299): exchange entry points, trade-up recipes, root and overlay
-  generators. Definitions that something outside the block also uses (a shared tag
-  generator, say) are not copied unless you choose them with `--copy-ids`.
+  block (e.g. 200-299) that belong to its setup: exchange entry points, trade-up recipes,
+  root and overlay generators. Definitions that something outside the block also uses (a
+  shared tag generator, say), or that nothing in the setup refers to, are not copied unless
+  you choose them with `--copy-ids`.
 - **New IDs:** each copy keeps its place in the block (205 → 305). A container gets the
   next free ID after the original (crate 2 → 3); `--new-id 2=50` picks another one.
 - **What changes in the copies:**
@@ -541,23 +562,44 @@ the next free one. Appending is always safe.
 | `import FILE ... [--replace]` | create the project, or add more Steam files to it |
 | `export [-o FILE] [--mark-live]` | write every definition to one Steam-ready file |
 | `gui [--choose] [--port N] [--no-browser]` | open the graphical editor (with the project chooser if there is no project here) |
-| `check` | validate the project (schema, templates, references, series, colours...) |
+| `check` | validate the project (see [What check looks for](#what-check-looks-for)) |
 | `list [SERIES] [--all]` / `show ID [--stored]` | series overview / one definition as exported |
 | `query` / `set` | find and change items (see above) |
 | `add` / `move` / `remove` | change a series (see above) |
 | `adopt KIND IDS` / `detach IDS` | convert items to a kind and back |
 | `schema [export \| import FILE]` | show, export or import tables and kinds |
 | `table [show \| new \| set \| delete \| rename \| import]` | edit lookup tables; import CSV reference data |
-| `series [new \| set]` | show, create (empty or `--copy-from` another series) or configure series (range, name, template, secret rares, containers, generators) |
+| `series [new \| set \| order]` | show, create (empty or `--copy-from` another series), configure (range, name, template, secret rares, containers, generators) or reorder series |
 | `colors [set \| rename \| delete \| convert]` | show or edit the colour palette; convert hex colours to it |
 | `template [TEXT]` | show or set the series line |
 | `mode [prerelease \| release]` / `mark-live` / `diff [--against FILE]` | release protection |
+
+## What check looks for
+
+`sisdefman check` (and the Check page) reports three levels. Errors stop `export`.
+
+- **Errors:** broken templates, tables or kinds; unknown colour keywords; overlapping series;
+  containers or generators that don't exist; a series without a display name whose text
+  needs one.
+- **Warnings**, mostly things players would see:
+  - `{series}` (the key) in a series line, or a table key such as `{weapon}` in a kind's rule
+    for `name`, `description` or `display_type`, where `{series_name}` or `{weapon.name}`
+    was probably meant;
+  - placeholders (`{series_name}`, `{contents}`) or colour keywords (`@rare`) left in exported text;
+  - an item whose colour, `tradable` or `marketable` differs from the other items with the
+    same tag, when that tag decides it for nearly every item (a `rarity:rare` item in the
+    common colour);
+  - an exchange recipe on a generator with an empty bundle, so the exchange grants nothing;
+  - references to missing or dummy items; series tags that don't match the ID ranges;
+  - a series range far larger than it needs (every definition added inside it joins the series).
+- **Notes:** unused IDs inside a series, empty generators, tag generators nothing uses, and
+  generators nothing refers to (reachable only if your game server grants them).
 
 ## The project file
 
 ```jsonc
 {
-    "sisdefman": 3,
+    "sisdefman": 4,
     "appid": 480,
     "mode": "prerelease",
     "settings": {
@@ -592,7 +634,9 @@ the next free one. Appending is always safe.
   list goes.
 - Dummy items inside a series' range are not stored.
 - The project file can be edited by hand. `sisdefman check` reports mistakes.
-- Older project files (versions 1 and 2) are upgraded automatically.
+- Older project files (versions 1-3) are upgraded automatically. Earlier versions stored a
+  series' key as its name when it had none; those series now have no display name, and
+  `check` asks for one.
 
 ## Development
 

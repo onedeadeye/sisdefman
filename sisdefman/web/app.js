@@ -1651,13 +1651,29 @@ function renderSeriesPage() {
   if (!ui.seriesDraft || ui.seriesDraft.for !== ui.seriesSel) ui.seriesDraft = makeSeriesDraft(ui.seriesSel);
   const d = ui.seriesDraft;
   const s = d.is_new ? null : S.series[d.key];
-  const list = h("div", { class: "list" },
-    keys.map((k) => h("button", { class: ui.seriesSel === k ? "active" : "", onclick: () => { ui.seriesSel = k; render(); } },
-      h("span", {}, S.series[k].display_name), h("span", { class: "hint" }, S.series[k].members.length))),
-    h("button", { class: ui.seriesSel === "__new__" ? "active" : "", onclick: () => { ui.seriesSel = "__new__"; render(); } }, "+ New series"));
+  const reorder = (order, msg) => mutate("series/order", { order }, msg);
+  const move = (n, delta) => {
+    const order = [...keys];
+    [order[n], order[n + delta]] = [order[n + delta], order[n]];
+    reorder(order);
+  };
+  const byId = [...keys].sort((a, b) => S.series[a].first_id - S.series[b].first_id);
+  const list = h("div", {},
+    h("div", { class: "list" },
+      keys.map((k, n) => h("div", { class: "list-row" + (ui.seriesSel === k ? " active" : "") },
+        h("button", { class: "grow", onclick: () => { ui.seriesSel = k; render(); } },
+          h("span", {}, S.series[k].display_name), h("span", { class: "hint" }, S.series[k].members.length)),
+        h("button", { class: "arrow", title: "Move up", disabled: n === 0, onclick: () => move(n, -1) }, "↑"),
+        h("button", { class: "arrow", title: "Move down", disabled: n === keys.length - 1, onclick: () => move(n, 1) }, "↓"))),
+      h("button", { class: ui.seriesSel === "__new__" ? "active" : "", onclick: () => { ui.seriesSel = "__new__"; render(); } }, "+ New series")),
+    byId.some((k, n) => k !== keys[n])
+      ? h("button", { class: "btn small", style: "margin-top:8px;width:100%", title: "Order the series by their first itemdefid",
+        onclick: () => reorder(byId, "Series sorted by ID.") }, "Sort by first ID") : null);
   const outside = S.items.filter((e) => !e.dummy && !e.series);
-  const options = (filter) => [h("option", { value: "" }, "—"),
-    outside.filter(filter).map((e) => h("option", { value: e.id }, `${e.id}: ${e.item.name || "(no name)"}`))];
+  // Always offer the current choice, whatever its type.
+  const options = (filter, current) => [h("option", { value: "" }, "—"),
+    outside.filter((e) => filter(e) || String(e.id) === String(current))
+      .map((e) => h("option", { value: e.id }, `${e.id}: ${e.item.name || "(no name)"}`))];
   const input = (key, attrs) => h("input", { type: "text", value: d[key], ...attrs, oninput: (ev) => {
     d[key] = ev.target.value;
     if (d.is_new && ["key", "name", "first_id"].includes(key) && d.copy.source && !d.copy.edited) refreshPlan(d);
@@ -1665,14 +1681,15 @@ function renderSeriesPage() {
   const copying = d.is_new && d.copy.source;
 
   const containerRows = d.containers.map((c, n) => {
-    const sel = h("select", { onchange: (ev) => { c.id = ev.target.value; } }, options(() => true));
+    const sel = h("select", { onchange: (ev) => { c.id = ev.target.value; } }, options(() => true, c.id));
     sel.value = c.id;
     return h("tr", {}, h("td", {}, sel),
       h("td", {}, h("input", { type: "text", class: "mono", value: c.exclude, placeholder: "e.g. rarity:epic", oninput: (ev) => { c.exclude = ev.target.value; } })),
       h("td", { class: "narrow" }, h("button", { class: "btn icon", onclick: () => { d.containers.splice(n, 1); render(); } }, "✕")));
   });
   const generatorRows = d.generators.map((g, n) => {
-    const sel = h("select", { onchange: (ev) => { g.id = ev.target.value; } }, options((e) => e.item.type === "generator"));
+    const sel = h("select", { onchange: (ev) => { g.id = ev.target.value; } },
+      options((e) => ["generator", "bundle"].includes(e.item.type), g.id));
     sel.value = g.id;
     return h("tr", {}, h("td", {}, sel),
       h("td", {}, h("input", { type: "text", class: "mono", value: g.rule, placeholder: "e.g. rarity:common", oninput: (ev) => { g.rule = ev.target.value; } })),
@@ -1736,6 +1753,7 @@ function renderSeriesPage() {
           h("div", { class: "row" },
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "First ID")), input("first_id", { type: "number", disabled: !d.is_new })),
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Last ID"), h("span", {}, "room to grow")), input("last_id", { type: "number" }))),
+          s && !s.named ? h("div", { class: "problems" }, `No display name yet: descriptions would show the key "${d.key}", so the project can't be exported until you enter one.`) : null,
           s ? h("p", { class: "hint" }, `${plural(s.members.length, "item")} (${s.members.length - s.secret_ids.length} + ${s.secret_ids.length} secret rares); IDs used up to ${s.allocated_through ?? "—"}; next free ID ${s.next_id}.`) : null,
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Secret rares"),
             h("span", {}, "items with these tags; empty = the tags the containers leave out")),

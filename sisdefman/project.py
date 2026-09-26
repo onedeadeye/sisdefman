@@ -27,12 +27,13 @@ import copy
 import datetime
 import json
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 from . import colors, derive, jsonfmt, steam
 from .derive import SeriesInfo
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 KEY_ORDER = ("sisdefman", "appid", "mode", "settings", "colors", "tables", "kinds", "series", "items", "live")
 MODES = ("prerelease", "release")
 
@@ -58,6 +59,12 @@ DEFAULT_DUMMY_ITEM = {
 
 TEMPLATE_FIELDS = ("description", "series", "series_name", "index", "count", "count_no_secret", "count_secret",
                    "itemdefid", "name", "tags")
+
+# While building, the name of a series without a display name is this marker
+# around its key, so any text that would show the key is found and reported.
+_UNNAMED = "\ue000{}\ue001"
+_UNNAMED_RE = re.compile("\ue000([^\ue001]*)\ue001")
+NO_DISPLAY_NAME = "has no display name"
 
 # Tokens filled in in the descriptions of a series' containers.
 CONTAINER_TOKENS = ("{contents}", "{contents_no_secret}", "{contents_secret}", "{count}", "{count_no_secret}",
@@ -133,8 +140,13 @@ class Project:
 
     def _check_shape(self) -> None:
         d = self.data
-        if d.get("sisdefman") in (1, 2):
-            d["sisdefman"] = FORMAT_VERSION  # version 2 added tables and kinds, version 3 colors
+        if d.get("sisdefman") in (1, 2, 3):
+            # Version 2 added tables and kinds, version 3 colors. Before version 4 a
+            # series without a display name stored its key as its name.
+            for key, s in (d.get("series") or {}).items():
+                if isinstance(s, dict) and s.get("name") == key:
+                    s["name"] = ""
+            d["sisdefman"] = FORMAT_VERSION
         if d.get("sisdefman") != FORMAT_VERSION:
             raise ProjectError(f"unsupported project format version {d.get('sisdefman')!r}")
         if d.get("mode") not in MODES:
@@ -248,6 +260,14 @@ class Project:
             raise ProjectError(f"no series named {key!r} (known: {known})")
         return self.series[key]
 
+    def insert_series(self, key: str, config: dict) -> None:
+        """Add a series, placed before the first one that starts at a higher ID."""
+        entries = [(k, v) for k, v in self.series.items() if k != key]
+        at = next((n for n, (_, v) in enumerate(entries) if v["first_id"] > config["first_id"]), len(entries))
+        entries.insert(at, (key, config))
+        self.series.clear()
+        self.series.update(entries)
+
     def series_for_id(self, itemdefid: int) -> Optional[str]:
         for key, s in self.series.items():
             if s["first_id"] <= itemdefid <= s["last_id"]:
@@ -293,8 +313,29 @@ class Project:
     def description_template(self, key: str) -> str:
         return self.get_series(key).get("description_template") or self.settings["description_template"]
 
-    def series_name(self, key: str) -> str:
-        return self.get_series(key).get("name") or key
+    def series_name(self, key: str, mark_unnamed: bool = False) -> str:
+        """The display name of a series. Without one, the key is shown in the
+        GUI and command line; ``mark_unnamed`` returns a marker instead, so
+        text built from it can be found (see ``unmark_names``)."""
+        name = self.get_series(key).get("name")
+        if name:
+            return name
+        return _UNNAMED.format(key) if mark_unnamed else key
+
+    def has_display_name(self, key: str) -> bool:
+        return bool(self.get_series(key).get("name"))
+
+    @staticmethod
+    def unmark_names(item: dict) -> List[str]:
+        """Replace the markers of series without a display name in ``item``
+        by their keys; returns a problem for each field that had one."""
+        problems = []
+        for field, value in item.items():
+            if isinstance(value, str) and "\ue000" in value:
+                for key in dict.fromkeys(_UNNAMED_RE.findall(value)):
+                    problems.append(f"series {key!r} {NO_DISPLAY_NAME}, so its key {key!r} would appear in {field}")
+                item[field] = _UNNAMED_RE.sub(lambda m: m.group(1), value)
+        return problems
 
     def secret_rules(self, key: str) -> List[List[str]]:
         """Tag rules marking a series' secret rares: the series' ``secret``
@@ -324,27 +365,28 @@ class Project:
         return out
 
     def series_info(self, key: str, index: int, count: Optional[int] = None,
-                    secret: Optional[int] = None) -> SeriesInfo:
+                    secret: Optional[int] = None, mark_unnamed: bool = False) -> SeriesInfo:
         """Position ``index`` in a series of ``count`` items (default: its
         current size) of which ``secret`` are secret rares."""
         count = len(self.members(key)) if count is None else count
         secret = len(self.secret_ids(key)) if secret is None else secret
-        return SeriesInfo(key, self.series_name(key), index, count, count - secret, secret)
+        return SeriesInfo(key, self.series_name(key, mark_unnamed), index, count, count - secret, secret)
 
-    def series_positions(self) -> Dict[int, SeriesInfo]:
+    def series_positions(self, mark_unnamed: bool = False) -> Dict[int, SeriesInfo]:
         out = {}
         for key in self.series:
             members = self.members(key)
             secret = len(self.secret_ids(key))
             for index, m in enumerate(members, 1):
-                out[m["itemdefid"]] = self.series_info(key, index, len(members), secret)
+                out[m["itemdefid"]] = self.series_info(key, index, len(members), secret, mark_unnamed)
         return out
 
-    def resolve_all(self) -> Tuple[Dict[int, dict], Dict[int, List[str]]]:
+    def resolve_all(self, positions: Optional[Dict[int, SeriesInfo]] = None
+                    ) -> Tuple[Dict[int, dict], Dict[int, List[str]]]:
         """Every record turned into its Steam definition (before series text,
         generator rules and container lists), plus problems per itemdefid."""
         schema = self.schema()
-        positions = self.series_positions()
+        positions = self.series_positions() if positions is None else positions
         resolved, problems = {}, {}
         for rec in self.items:
             item, probs = derive.resolve(schema, rec, positions.get(rec["itemdefid"]))
@@ -437,9 +479,9 @@ class Project:
         return self.build_with_problems()[0]
 
     def build_with_problems(self) -> Tuple[List[dict], Dict[int, List[str]]]:
-        out, problems = self.resolve_all()
+        positions = self.series_positions(mark_unnamed=True)
+        out, problems = self.resolve_all(positions)
         records = self.by_id()
-        positions = self.series_positions()
         for key, s in self.series.items():
             members = self.members(key)
             for m in members:
@@ -457,7 +499,7 @@ class Project:
                       "{contents_no_secret}": "\n".join(n for is_secret, n in names if not is_secret),
                       "{contents_secret}": "\n".join(n for is_secret, n in names if is_secret),
                       "{count}": str(count), "{count_no_secret}": str(count - secret),
-                      "{count_secret}": str(secret), "{series_name}": self.series_name(key)}
+                      "{count_secret}": str(secret), "{series_name}": self.series_name(key, True)}
             for cid in self.container_ids(key):
                 c = out.get(cid)
                 text = (c or {}).get("description")
@@ -474,7 +516,7 @@ class Project:
                 if i not in out:
                     out[i] = self.make_dummy(i)
         for i, item in out.items():
-            found = self.resolve_colors(item)
+            found = self.resolve_colors(item) + self.unmark_names(item)
             if found:
                 problems.setdefault(i, []).extend(found)
         return [out[i] for i in sorted(out)], problems

@@ -251,14 +251,16 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
         for field in ("first_id", "last_id"):
             if not isinstance(config.get(field), int) or isinstance(config.get(field), bool):
                 raise ProjectError(f"{field} must be a whole number")
-        s = {"name": key, "first_id": config["first_id"], "last_id": config["last_id"],
+        if not str(config.get("name") or "").strip():
+            raise ProjectError("give the series a display name; descriptions show it (e.g. \"Third Series #4\")")
+        s = {"name": "", "first_id": config["first_id"], "last_id": config["last_id"],
              "allocated_through": None, "containers": {}, "generators": {}}
     else:
         s = copy.deepcopy(project.get_series(key))
         if "first_id" in config and config["first_id"] != s["first_id"]:
             raise ProjectError("the first ID of an existing series cannot change")
-    if config.get("name") not in (None, ""):
-        s["name"] = str(config["name"])
+    if str(config.get("name") or "").strip():
+        s["name"] = str(config["name"]).strip()
     if "last_id" in config and not is_new:
         s["last_id"] = config["last_id"]
     if s["last_id"] < s["first_id"]:
@@ -327,8 +329,30 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
     for cid in s["containers"]:
         if not any(t in (by_id[int(cid)].get("description") or "") for t in LISTING_TOKENS):
             notes.append(f"Put {CONTENTS_TOKEN} in the description of {cid} where the item list should go.")
-    project.series[key] = s
+    if is_new:
+        project.insert_series(key, s)
+    else:
+        project.series[key] = s
     return notes
+
+
+def reorder_series(project: Project, keys: List[str]) -> List[str]:
+    """Put the series in this order (as the GUI and ``list`` show them);
+    series not listed follow in their current order. Only the order changes."""
+    keys = [str(k) for k in keys]
+    for k in keys:
+        project.get_series(k)
+    if len(set(keys)) != len(keys):
+        raise ProjectError("a series is listed more than once")
+    order = keys + [k for k in project.series if k not in keys]
+    entries = [(k, project.series[k]) for k in order]
+    project.series.clear()
+    project.series.update(entries)
+    return order
+
+
+def series_by_first_id(project: Project) -> List[str]:
+    return sorted(project.series, key=lambda k: project.series[k]["first_id"])
 
 
 def delete_series(project: Project, key: str) -> None:
@@ -344,11 +368,17 @@ _NO_TEXT_REPLACE = ("itemdefid", "kind", "bundle", "exchange", "tag_generators",
 
 
 def suggest_series(project: Project) -> dict:
-    """Defaults for a new series, following the last one: the next key
-    (crate2 -> crate3) and the next ID block of the same size."""
+    """Defaults for a new series, following the last one of the largest
+    family (crate1..crate5 -> crate6, rather than promo1 -> promo2): the
+    next key and the next ID block of the same size."""
     if not project.series:
         return {"key": "series1", "first_id": None, "last_id": None, "source": None}
-    by_start = sorted(project.series, key=lambda k: project.series[k]["first_id"])
+    families: Dict[str, List[str]] = {}
+    for k in project.series:
+        m = re.match(r"^(.*?)(\d+)$", k)
+        families.setdefault(m.group(1) if m else k, []).append(k)
+    family = max(families.values(), key=lambda ks: (len(ks), max(project.series[k]["first_id"] for k in ks)))
+    by_start = sorted(family, key=lambda k: project.series[k]["first_id"])
     source = by_start[-1]
     s = project.series[source]
     m = re.match(r"^(.*?)(\d+)$", source)
@@ -357,13 +387,18 @@ def suggest_series(project: Project) -> dict:
     while key in project.series:
         number += 1
         key = f"{prefix}{number + 1}"
+    used = (s.get("allocated_through") or s["first_id"]) - s["first_id"] + 1
+    block = max(100, 10 ** len(str(used)))
+    span = s["last_id"] - s["first_id"]
+    if span + 1 > 10 * block:  # an oversized range is not worth repeating
+        span = block - 2
     if len(by_start) > 1:
         step = s["first_id"] - project.series[by_start[-2]]["first_id"]
     else:
-        step = 10 ** len(str(s["last_id"] - s["first_id"] + 1))
-    first, last = s["first_id"] + step, s["last_id"] + step
-    used = project.by_id()
-    while any(first <= i <= last for i in used) or any(
+        step = max(block, 10 ** len(str(span + 1)))
+    first, last = s["first_id"] + step, s["first_id"] + step + span
+    used_ids = project.by_id()
+    while any(first <= i <= last for i in used_ids) or any(
             o["first_id"] <= last and first <= o["last_id"] for o in project.series.values()):
         first, last = first + step, last + step
     return {"key": key, "first_id": first, "last_id": last, "source": source}
@@ -398,6 +433,7 @@ def series_copy_plan(project: Project, source: str, key: str, name: str, first_i
             referenced_elsewhere.update(r for _, r in steam.references(rec))
         except steam.SyntaxProblem:
             pass
+    connected = _connected(project, source, ids)
     taken = set(records)
     candidates = []
     for i in ids:
@@ -410,14 +446,49 @@ def series_copy_plan(project: Project, source: str, key: str, name: str, first_i
             new = i + offset
         shared = i in referenced_elsewhere and i not in containers
         rec = records[i]
+        note = ""
+        if shared:
+            note = "also used outside this series (shared); not copied unless ticked"
+        elif i not in connected:
+            note = "not connected to this series' crate, generators or items; not copied unless ticked"
         candidates.append({
             "id": i, "new_id": new, "name": rec.get("name", ""), "type": rec.get("type", ""),
             "role": "container" if i in containers else ("generator" if str(i) in s["generators"] else ""),
-            "copy": not shared,
-            "note": "also used outside this series (shared); not copied unless ticked" if shared else "",
+            "copy": not note,
+            "note": note,
         })
     return {"candidates": candidates, "replacements": _suggest_replacements(project, source, key,
-                                                                            s.get("name") or source, name, ids)}
+                                                                            s.get("name") or "", name, ids)}
+
+
+def _connected(project: Project, source: str, ids: List[int]) -> set:
+    """The definitions among ``ids`` that belong to the setup of series
+    ``source``: its containers, generators and items, and whatever refers to
+    them, is referred to by them or names series:source in its exchange
+    recipe or tags, step by step."""
+    s = project.get_series(source)
+    records = project.by_id()
+    connected = {int(k) for k in list(s["containers"]) + list(s["generators"])}
+    connected |= {m["itemdefid"] for m in project.members(source)}
+    refs = {}
+    for i in set(ids) | connected:
+        try:
+            refs[i] = {r for _, r in steam.references(records[i])} if i in records else set()
+        except steam.SyntaxProblem:
+            refs[i] = set()
+    tag = re.compile(r"(^|[;,])series:" + re.escape(source) + r"(?=[;,*]|$)")
+    changed = True
+    while changed:
+        changed = False
+        for i in ids:
+            if i in connected:
+                continue
+            rec = records[i]
+            if (refs[i] & connected or any(i in refs.get(j, ()) for j in connected)
+                    or any(tag.search(rec.get(f) or "") for f in ("exchange", "tags"))):
+                connected.add(i)
+                changed = True
+    return connected
 
 
 def _suggest_replacements(project: Project, source: str, key: str, old_name: str, new_name: str,

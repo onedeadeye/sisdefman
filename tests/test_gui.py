@@ -205,6 +205,21 @@ class GuiServerTests(unittest.TestCase):
         self.assertIsNone(self.project().item(2))
         self.assertNotIn("crate2", self.project().series)
 
+    def test_series_order_and_names(self):
+        self.post("series/save", {"key": "crate0", "config": {"name": "Zero", "first_id": 50, "last_id": 60},
+                                  "is_new": True})
+        self.assertEqual(list(self.project().series), ["crate0", "crate1"])
+        status, data = self.post("series/order", {"order": ["crate1"]})
+        self.assertEqual((status, data["result"]["order"]), (200, ["crate1", "crate0"]))
+        state = self.call("GET", "/api/state")[1]["result"]
+        self.assertEqual(list(state["series"]), ["crate1", "crate0"])
+        self.assertTrue(state["series"]["crate1"]["named"])
+        self.post("series/order", {"by_id": True})
+        self.assertEqual(list(self.project().series), ["crate0", "crate1"])
+        self.assertEqual(self.post("series/order", {"order": ["nope"]})[0], 400)
+        self.assertEqual(self.post("series/save", {"key": "x", "config": {"first_id": 70, "last_id": 80},
+                                                   "is_new": True})[0], 400)  # no display name
+
     def test_items_remove_move_set_export_import(self):
         status, data = self.post("item/move", {"id": 117, "position": 1})
         self.assertEqual(data["result"]["moved"]["117"], 110)

@@ -93,6 +93,7 @@ def import_files(
         raise ProjectError(f"the files are for different apps: {', '.join(map(str, sorted(appids)))}")
     appid = next(iter(appids), None)
 
+    fresh = project is None
     if project is None:
         project = Project.new(appid)
     else:
@@ -124,6 +125,8 @@ def import_files(
             _detect_series(project, key, report)
 
     _absorb_series_dummies(project, report)
+    _find_series_names(project, [k for k in tags if k in project.series], report)
+    _adopt_series_lines(project, [k for k in tags if k in project.series], set(origin), fresh, report)
     _strip_series_affixes(project, set(origin), report)
     project.normalize()
     return project, report
@@ -190,9 +193,12 @@ def _detect_series(project: Project, key: str, report: Report) -> None:
         through += 1
     blockers = [i for i in by_id if i > through and not project.is_dummy(by_id[i])]
     blockers += [s["first_id"] for s in project.series.values() if s["first_id"] > through]
-    last = min(blockers) - 1 if blockers else through
+    # The range ends before the next definition, but not past the end of the
+    # ID block the series is in (5001-5006 -> up to 5099), so it doesn't
+    # claim every ID up to a far-away definition.
+    last = min(blockers + [block_end(first, through) + 1]) - 1
 
-    name = key
+    name = ""
     for c in containers:
         m = _SERIES_NAME.search(c.get("description") or "")
         if m:
@@ -207,21 +213,16 @@ def _detect_series(project: Project, key: str, report: Report) -> None:
         "containers": {},
         "generators": {},
     }
-    project.series[key] = config
+    project.insert_series(key, config)
     holes = [i for i in range(first, high + 1) if i not in member_ids and i not in foreign]
     extra = f", {through - high} unused ID(s) after it" if through > high else ""
     report.info(
-        f"series {key!r} ({name}): {len(members)} items at IDs {first}-{high}{extra}; "
+        f"series {key!r}{f' ({name})' if name else ''}: {len(members)} items at IDs {first}-{high}{extra}; "
         f"room up to ID {last}"
     )
     if holes:
         report.warn(f"series:{key}: IDs {_short(holes)} inside the series are unused; they are exported as dummy "
                     "items")
-    if not blockers:
-        report.warn(f"series {key!r}: nothing follows it, so it has no room to grow. "
-                    f"Set the end of its ID range with `sisdefman series set {key} --last-id N`.")
-    if name == key:
-        report.info(f"  set its display name with `sisdefman series set {key} --name \"...\"`")
     _absorb_series_dummies(project, report, [key])
 
     member_set = set(member_ids)
@@ -379,6 +380,111 @@ def _absorb_series_dummies(project: Project, report: Report, keys: Optional[List
         s["allocated_through"] = max(s.get("allocated_through") or 0, top)
         project.items[:] = [it for it in project.items if all(it is not d for d in dummies)]
         report.info(f"  {len(dummies)} dummy item(s) in the series' ID range will be generated on export")
+
+
+def block_end(first: int, through: int) -> int:
+    """The end of the ID block of a series using IDs first..through: blocks
+    of 100 IDs, or larger for larger series."""
+    size = max(100, 10 ** len(str(through - first + 1)))
+    return (through // size + 1) * size - 1
+
+
+def _find_series_names(project: Project, keys: List[str], report: Report) -> None:
+    """Give series without a display name the one their items' series lines
+    already show ("... Promo Pack #3"). The key itself never counts: text
+    showing it is the mistake this avoids."""
+    positions = project.series_positions(mark_unnamed=True)
+    for key in keys:
+        if project.has_display_name(key):
+            continue
+        members = project.members(key)
+        found = []
+        for index, m in enumerate(members, 1):
+            desc = m.get("description") or ""
+            _, after = project.template_affixes(key, m, positions[m["itemdefid"]])
+            pattern = None
+            if "\ue000" in after:
+                pattern = re.escape(after).replace(re.escape(project.series_name(key, True)), "(.+?)") + "$"
+            m_ = re.search(pattern, desc) if pattern else None
+            if m_ is None:  # a series line written another way: "... Name #3" as the last paragraph
+                m_ = re.search(r"(?:^|\n)([^\n#]+?)\s+#0*" + str(index) + r"\b[^\n]*$", desc)
+            if m_:
+                found.append(m_.group(1).strip())
+        names = set(found)
+        if len(names) == 1 and len(found) >= min(2, len(members)) and found[0] != key:
+            project.series[key]["name"] = found[0]
+            report.info(f"series {key!r}: display name {found[0]!r}, from its items' descriptions")
+        else:
+            shown = f" (its descriptions show the key {key!r} instead)" if found and names == {key} else ""
+            report.warn(f"series {key!r}: no display name found{shown}. Set one with `sisdefman series set {key} "
+                        "--name NAME` or on the Series setup page; until then its descriptions can't be exported.")
+
+
+def _line_templates(project: Project, key: str, imported: set) -> Optional[set]:
+    """The series-line templates that describe how the imported items of a
+    series already end ("\\n\\nFirst Series #3/15"), or None."""
+    if not project.has_display_name(key):
+        return None
+    name = project.series_name(key)
+    members = project.members(key)
+    count, secret = len(members), len(project.secret_ids(key))
+    values = {"count": count, "count_no_secret": count - secret, "count_secret": secret}
+    found = None
+    for index, m in enumerate(members, 1):
+        if m["itemdefid"] not in imported:
+            continue
+        last = (m.get("description") or "").rpartition("\n\n")[2]
+        match = re.fullmatch(re.escape(name) + r" #(\d+)(.*)", last)
+        if not match or int(match.group(1)) != index:
+            return None
+        digits = match.group(1)
+        options = ["{description}\n\n{series_name} #" + (f"{{index:0{len(digits)}d}}" if digits[0] == "0" and
+                                                             len(digits) > 1 else "{index}")]
+        for n, part in enumerate(re.split(r"(\d+)", match.group(2))):
+            if n % 2 == 0:
+                options = [o + part.replace("{", "{{").replace("}", "}}") for o in options]
+            else:
+                tokens = [f"{{{k}}}" for k, v in values.items() if str(v) == part] or [part]
+                options = [o + t for o in options for t in tokens]
+        found = set(options) if found is None else found & set(options)
+        if not found:
+            return None
+    return found
+
+
+def _adopt_series_lines(project: Project, keys: List[str], imported: set, fresh: bool, report: Report) -> None:
+    """If imported items already end with a series line the description
+    template doesn't produce (an earlier export made with another template),
+    use a template that matches it, so the line is recognised and not added
+    a second time."""
+    positions = project.series_positions()
+    matching = {}
+    for key in keys:
+        members = [m for m in project.members(key) if m["itemdefid"] in imported]
+        if not members:
+            continue
+        m = members[0]
+        before, after = project.template_affixes(key, m, positions[m["itemdefid"]])
+        if (before or after) and (m.get("description") or "").endswith(after) and after.strip():
+            continue  # the current template already matches
+        options = _line_templates(project, key, imported)
+        if options:
+            matching[key] = options
+    if not matching:
+        return
+    order = lambda t: (sum(c.isdigit() for c in t.replace("{index:0", "")), t)  # noqa: E731
+    common = set.intersection(*matching.values())
+    if fresh and common:
+        template = sorted(common, key=order)[0]
+        project.settings["description_template"] = template
+        report.info(f"description template set to {template!r}, matching the series lines already in the "
+                    "descriptions")
+        return
+    for key, options in matching.items():
+        template = sorted(options, key=order)[0]
+        project.series[key]["description_template"] = template
+        report.info(f"series {key!r}: description template set to {template!r}, matching the series lines "
+                    "already in its descriptions")
 
 
 def _strip_series_affixes(project: Project, imported: set, report: Report) -> None:

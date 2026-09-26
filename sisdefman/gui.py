@@ -136,7 +136,8 @@ class App:
         series = {}
         for key, s in project.series.items():
             members = [m["itemdefid"] for m in project.members(key)]
-            series[key] = dict(copy.deepcopy(s), display_name=project.series_name(key), members=members,
+            series[key] = dict(copy.deepcopy(s), display_name=project.series_name(key),
+                               named=project.has_display_name(key), members=members,
                                next_id=(members[-1] + 1) if members else s["first_id"],
                                secret_ids=project.secret_ids(key),
                                secret_rules=[";".join(r) for r in project.secret_rules(key)])
@@ -295,6 +296,9 @@ class App:
             if body.get("dry_run"):
                 return create(self.load())
             return self.mutate("Creating this series", create, confirm)
+        if route == "series/order":
+            order = edits.series_by_first_id(self.load()) if body.get("by_id") else list(body.get("order") or [])
+            return self.mutate("Reordering series", lambda p: {"order": edits.reorder_series(p, order)}, confirm)
         if route == "series/delete":
             return self.mutate("Deleting this series", lambda p: edits.delete_series(p, body["key"]), confirm)
         if route == "settings/save":

@@ -109,6 +109,63 @@ class NewSeriesTests(unittest.TestCase):
             self.copy(first=150, last=180)  # overlaps crate1
         self.assertEqual(json.dumps(self.project.data, sort_keys=True), before)
 
+    def test_suggestion_follows_the_largest_family(self):
+        self.copy()
+        edits.save_series(self.project, "promo1", {"name": "Promo Pack", "first_id": 20001, "last_id": 999998},
+                          is_new=True)
+        self.assertEqual(edits.suggest_series(self.project)["key"], "crate3")
+        del self.project.series["crate2"]
+        self.project.series.pop("crate1")
+        # Only the oversized series is left: its range is not repeated, and the new one starts after it.
+        self.assertEqual(edits.suggest_series(self.project),
+                         {"key": "promo2", "first_id": 1000001, "last_id": 1000099, "source": "promo1"})
+        self.project.series["promo1"]["last_id"] = 20099
+        self.assertEqual(edits.suggest_series(self.project),
+                         {"key": "promo2", "first_id": 20101, "last_id": 20199, "source": "promo1"})
+
+    def test_definitions_not_connected_to_the_series_are_not_copied_by_default(self):
+        self.project.items.append({"itemdefid": 106, "type": "tag_generator", "name": "Something else",
+                                   "tag_generator_name": "x", "tag_generator_values": "a"})
+        by_id = {c["id"]: c for c in edits.series_copy_plan(self.project, "crate1", "crate2", "", 210)["candidates"]}
+        self.assertFalse(by_id[106]["copy"])
+        self.assertIn("not connected", by_id[106]["note"])
+        self.assertTrue(all(c["copy"] for i, c in by_id.items() if i != 106))
+
+    def test_order(self):
+        edits.save_series(self.project, "crate0", {"name": "Zero", "first_id": 50, "last_id": 60}, is_new=True)
+        self.copy()
+        self.assertEqual(list(self.project.series), ["crate0", "crate1", "crate2"])  # new ones go in ID order
+        self.assertEqual(edits.reorder_series(self.project, ["crate2"]), ["crate2", "crate0", "crate1"])
+        self.assertEqual(list(self.project.series), ["crate2", "crate0", "crate1"])
+        self.assertEqual(self.project.series["crate2"]["first_id"], 210)
+        for bad in (["nope"], ["crate1", "crate1"]):
+            with self.assertRaises(ProjectError):
+                edits.reorder_series(self.project, bad)
+        edits.reorder_series(self.project, edits.series_by_first_id(self.project))
+        self.assertEqual(list(self.project.series), ["crate0", "crate1", "crate2"])
+
+    def test_imported_series_go_in_id_order(self):
+        doc = {"appid": fixtures.APPID, "items": [
+            fixtures.skin(50 + n, name, "common", "pistol", series="early") for n, name in
+            enumerate(["Pistol | A", "Pistol | B"])]}
+        path = os.path.join(self.tmp.name, "early.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        project, _ = importer.import_files([path], self.project)
+        self.assertEqual(list(project.series), ["early", "crate1"])
+        self.assertEqual(project.series["early"]["last_id"], 99)  # up to crate1's supporting definitions
+
+    def test_imported_range_ends_with_its_id_block(self):
+        doc = fixtures.crate_file()
+        doc["items"] = [it for it in doc["items"] if it["itemdefid"] < 197]
+        doc["items"][1]["bundle"] = ""
+        path = os.path.join(self.tmp.name, "c.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        extras = os.path.join(self.tmp.name, "extras.json")  # has 999999
+        project, _ = importer.import_files([path, extras])
+        self.assertEqual(project.series["crate1"]["last_id"], 199)
+
     def test_empty_series(self):
         report = edits.create_series(self.project, "crate2", {"name": "Second Series", "first_id": 210,
                                                               "last_id": 296})
@@ -153,6 +210,14 @@ class NewSeriesCommandTests(unittest.TestCase):
         self.assertEqual(s["secret"], "rarity:epic")
         self.assertEqual(project.item(7)["name"], "Second Box")
         self.assertIsNone(project.item(200))
+
+    def test_order_command(self):
+        self.cli("series", "new", "crate0", "--name", "Zero", "--first-id", "50", "--last-id", "60")
+        code, out = self.cli("series", "order", "crate1")
+        self.assertEqual((code, list(Project.load(self.path).series)), (0, ["crate1", "crate0"]), out)
+        code, out = self.cli("series", "order", "--by-id")
+        self.assertIn("Series order: crate0, crate1", out)
+        self.assertEqual(self.cli("series", "order")[0], 1)
 
     def test_empty_series_dry_run(self):
         code, out = self.cli("series", "new", "crate2", "--name", "Second", "-n")

@@ -153,7 +153,8 @@ def cmd_list(args) -> int:
         next_id = (members[-1]["itemdefid"] + 1) if members else s["first_id"]
         secret = len(project.secret_ids(key))
         counts = f"{len(members)} items" + (f" ({len(members) - secret} + {secret} secret)" if secret else "")
-        print(ui.bold(f"{key} - {project.series_name(key)}") +
+        label = project.series_name(key) if project.has_display_name(key) else ui.red("(no display name)")
+        print(ui.bold(f"{key} - ") + label +
               f"  (IDs {s['first_id']}-{s['last_id']}, {counts}, next free ID {next_id})")
         if not args.series:
             continue
@@ -331,7 +332,8 @@ def cmd_series(args) -> int:
             print("No series. Create one with `sisdefman series new`.")
         for key, s in project.series.items():
             members = project.members(key)
-            print(ui.bold(f"{key}") + f"  {project.series_name(key)!r}")
+            label = repr(project.series_name(key)) if project.has_display_name(key) else ui.red("no display name")
+            print(ui.bold(f"{key}") + f"  {label}")
             print(f"    IDs {s['first_id']}-{s['last_id']}, {len(members)} items, "
                   f"used through {s.get('allocated_through')}")
             if s.get("description_template"):
@@ -345,6 +347,14 @@ def cmd_series(args) -> int:
             rules = " or ".join(";".join(r) for r in project.secret_rules(key)) or "none"
             source = "" if "secret" in s else " (from the containers)"
             print(f"    secret rares: items tagged {rules}{source}: {len(secret)} of {len(members)}")
+        return 0
+
+    if action == "order":
+        if args.by_id == bool(args.keys):
+            raise ProjectError("give the series keys in the order you want, or --by-id")
+        order = edits.reorder_series(project, edits.series_by_first_id(project) if args.by_id else args.keys)
+        project.save()
+        print(ui.green("Series order: " + ", ".join(order)))
         return 0
 
     config = {"name": getattr(args, "name", None)}
@@ -904,6 +914,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="stop managing this container or generator")
         sp.set_defaults(func=cmd_series)
     ssub.add_parser("list", help="Show all series.", parents=[common]).set_defaults(func=cmd_series)
+    sp = ssub.add_parser("order", help="Change the order series are shown in.", parents=[common],
+                         description="Change the order series are listed in (here and in the GUI). Series not "
+                                     "named keep their order after the named ones. Nothing is renumbered.")
+    sp.add_argument("keys", nargs="*", metavar="KEY", help="series keys in the order you want")
+    sp.add_argument("--by-id", action="store_true", help="sort all series by their first itemdefid")
+    sp.set_defaults(func=cmd_series)
 
     p = command("template", "Show or set the description template used for series items.")
     p.add_argument("template", nargs="?", help="new template; \\n is a line break")
