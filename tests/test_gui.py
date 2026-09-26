@@ -162,6 +162,49 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(self.project().tables["weapon_data"]["rows"]["rifle"], {"label": "Long Rifle", "Range": "LONG"})
         self.assertEqual(self.post("table/csv-preview", {"csv": ""})[0], 400)
 
+    def test_colors(self):
+        state = self.call("GET", "/api/state")[1]["result"]
+        self.assertEqual((state["colors"], state["hex_colors_left"]), ({}, 19))  # + the kind rule
+        data = self.post("colors/convert", {"dry_run": True})[1]["result"]
+        self.assertEqual(data["created"]["common"], "d2d2d2")
+        self.assertEqual(self.project().colors, {})
+        self.post("colors/convert")
+        state = self.call("GET", "/api/state")[1]["result"]
+        self.assertEqual((state["hex_colors_left"], state["color_usage"]["common"]), (0, 4))
+        palette = dict(self.project().colors)
+        palette["secret_rare"] = palette.pop("epic")
+        palette["spare"] = "123456"
+        status, _ = self.post("colors/save", {"colors": palette, "renames": {"epic": "secret_rare"}})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.project().item(116)["name_color"], "@secret_rare")
+        status, data = self.post("colors/save", {"colors": {"spare": "123456"}})
+        self.assertEqual(status, 400)  # the others are in use
+        record = dict(self.project().item(110), name_color="@spare")
+        preview = self.post("preview", {"record": record})[1]["result"]
+        self.assertEqual(preview["item"]["name_color"], "123456")
+
+    def test_new_series_with_a_copy_of_the_setup(self):
+        state = self.call("GET", "/api/state")[1]["result"]
+        self.assertEqual(state["new_series"], {"key": "crate2", "first_id": 210, "last_id": 296, "source": "crate1"})
+        status, data = self.post("series/plan", {"source": "crate1", "key": "crate2", "name": "Second Series",
+                                                 "first_id": 210})
+        plan = data["result"]
+        self.assertEqual(plan["candidates"][0]["new_id"], 2)
+        body = {"key": "crate2", "config": {"name": "Second Series", "first_id": 210, "last_id": 296},
+                "copy": {"source": "crate1", "ids": [c["id"] for c in plan["candidates"]],
+                         "new_ids": {str(c["id"]): c["new_id"] for c in plan["candidates"]},
+                         "replacements": plan["replacements"]}}
+        status, data = self.post("series/create", dict(body, dry_run=True))
+        self.assertEqual((status, len(data["result"]["created"])), (200, 11))
+        self.assertNotIn("crate2", self.project().series)
+        status, data = self.post("series/create", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.project().item(2)["name"], "Second Crate")
+        self.assertEqual(self.post("series/create", body)[0], 400)  # it exists now
+        self.assertEqual(self.post("undo")[0], 200)
+        self.assertIsNone(self.project().item(2))
+        self.assertNotIn("crate2", self.project().series)
+
     def test_items_remove_move_set_export_import(self):
         status, data = self.post("item/move", {"id": 117, "position": 1})
         self.assertEqual(data["result"]["moved"]["117"], 110)

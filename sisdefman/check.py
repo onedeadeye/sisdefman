@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from . import derive, steam
-from .project import CONTENTS_TOKEN, Project, ProjectError
+from . import colors, derive, steam
+from .project import LISTING_TOKENS, Project, ProjectError
 
 LEVELS = ("error", "warning", "note")
 
@@ -28,7 +28,7 @@ def check_project(project: Project) -> List[Issue]:
     def add(level: str, text: str, itemdefid: Optional[int] = None) -> None:
         issues.append(Issue(level, text, itemdefid))
 
-    for problem in derive.check_definitions(project.schema()):
+    for problem in derive.check_definitions(project.schema()) + colors.check_palette(project.colors):
         add("error", problem)
     try:
         built, problems = project.build_with_problems()
@@ -42,7 +42,7 @@ def check_project(project: Project) -> List[Issue]:
     # ------------------------------------------------------------ each item
     for i, found in problems.items():
         for problem in found:
-            add("error" if problem.startswith("unknown kind") else "warning", problem, i)
+            add("error" if problem.startswith(("unknown kind", "unknown colour")) else "warning", problem, i)
     records = project.by_id()
     for it in (exported[i] for i in records):
         i = it["itemdefid"]
@@ -126,8 +126,8 @@ def check_project(project: Project) -> List[Issue]:
                 add("error", f"series {key!r}: container {cid} does not exist")
             elif project.series_for_id(cid) is not None:
                 add("error", f"series {key!r}: container {cid} is inside a series' ID range")
-            elif CONTENTS_TOKEN not in (c.get("description") or ""):
-                add("warning", f"container of series {key!r} has no {CONTENTS_TOKEN} in its description, "
+            elif not any(t in (c.get("description") or "") for t in LISTING_TOKENS):
+                add("warning", f"container of series {key!r} has no {{contents}} in its description, "
                                "so its item list is not generated", cid)
             try:
                 rules = [steam.parse_tag_rule(r) for r in (cfg or {}).get("exclude", [])]
@@ -159,8 +159,9 @@ def check_project(project: Project) -> List[Issue]:
                                "grants nothing", gid)
 
     for it in built:
-        if CONTENTS_TOKEN in (it.get("description") or ""):
-            add("warning", f"description still contains {CONTENTS_TOKEN}; only containers configured in a "
+        left = [t for t in LISTING_TOKENS if t in (it.get("description") or "")]
+        if left:
+            add("warning", f"description still contains {left[0]}; only containers configured in a "
                            "series get it filled in", it["itemdefid"])
 
     if project.mode == "release" and project.live_names() is None:

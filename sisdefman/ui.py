@@ -50,6 +50,17 @@ def green(text: str) -> str:
     return _wrap("32", text)
 
 
+def swatch(hex_color: str) -> str:
+    """A block in the given colour (only when the terminal shows colour)."""
+    if not _color_enabled(sys.stdout) or len(hex_color) != 6:
+        return ""
+    try:
+        r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return ""
+    return f"\033[38;2;{r};{g};{b}m\u2588\u2588\033[0m "
+
+
 def banner(title: str, width: int = 76) -> str:
     bar = "!" * width
     inner = width - 6

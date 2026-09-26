@@ -86,14 +86,47 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(project.series["crate1"]["last_id"], 149)
         self.assertNotIn("150", project.series["crate1"]["generators"])
 
-    def test_untagged_item_inside_run_blocks_series(self):
+    def untag_113(self):
         doc = fixtures.crate_file()
         for it in doc["items"]:
             if it["itemdefid"] == 113:
                 it["tags"] = "type:skin"
-        project, report = importer.import_files([write(self.dir, "c.json", doc)])
+        return write(self.dir, "c.json", doc)
+
+    def test_untagged_item_inside_run_joins_the_series_with_a_warning(self):
+        project, report = importer.import_files([self.untag_113()])
+        s = project.series["crate1"]
+        self.assertEqual((s["first_id"], s["last_id"]), (110, 196))
+        self.assertEqual([m["itemdefid"] for m in project.members("crate1")], list(range(110, 118)))
+        warnings = "\n".join(text for level, text in report.lines if level == "warn")
+        self.assertIn("the definitions at 113 sit between its items", warnings)
+        issues = [str(i) for i in check.check_project(project)]
+        self.assertIn("warning: [113] is in series 'crate1' but not tagged series:crate1", issues)
+
+    def test_release_mode_keeps_the_restriction(self):
+        project = Project.new(fixtures.APPID)
+        project.mode = "release"
+        project, report = importer.import_files([self.untag_113()], project)
         self.assertNotIn("crate1", project.series)
-        self.assertTrue(any("not set up" in text for _, text in report.lines))
+        self.assertTrue(any("release mode it is not set up" in text for _, text in report.lines))
+
+    def test_far_away_tagged_item_is_left_out(self):
+        doc = fixtures.crate_file()
+        doc["items"][0]["description"] = "A crate that does not list its items yet."
+        project, report = importer.import_files([write(self.dir, "c.json", doc)])
+        s = project.series["crate1"]
+        self.assertEqual((s["first_id"], s["containers"]), (110, {}))
+        warnings = "\n".join(text for level, text in report.lines if level == "warn")
+        self.assertIn("1 is tagged series:crate1 but far from its other items (IDs 110-117)", warnings)
+        self.assertIn("--container ID", warnings)
+
+    def test_gaps_are_reported(self):
+        doc = fixtures.crate_file()
+        doc["items"] = [it for it in doc["items"] if it["itemdefid"] != 113]
+        doc["items"][0]["description"] = doc["items"][0]["description"].replace("Pistol | Stripes\n", "")
+        project, report = importer.import_files([write(self.dir, "c.json", doc)])
+        warnings = "\n".join(text for level, text in report.lines if level == "warn")
+        self.assertIn("IDs 113 inside the series are unused", warnings)
 
     def test_merging_into_an_existing_project(self):
         project, _ = importer.import_files(self.paths[:1])

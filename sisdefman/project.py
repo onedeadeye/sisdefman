@@ -6,6 +6,7 @@ the metadata sisdefman needs to manage them:
 * ``items``   - one record per itemdefid. A record without a ``kind`` holds
   the Steam definition as-is; a record with a kind holds that kind's fields
   and any overrides, and the rest is derived (see ``derive``).
+* ``colors``  - the colour palette; colour fields can say ``@keyword``.
 * ``tables``  - lookup tables used by kinds (e.g. weapon -> display name).
 * ``kinds``   - families of items whose fields are derived from templates.
 * ``series``  - ordered groups of items that occupy a contiguous ID range.
@@ -28,16 +29,17 @@ import json
 import os
 from typing import Dict, List, Optional, Tuple
 
-from . import derive, jsonfmt, steam
+from . import colors, derive, jsonfmt, steam
 from .derive import SeriesInfo
 
-FORMAT_VERSION = 2
-KEY_ORDER = ("sisdefman", "appid", "mode", "settings", "tables", "kinds", "series", "items", "live")
+FORMAT_VERSION = 3
+KEY_ORDER = ("sisdefman", "appid", "mode", "settings", "colors", "tables", "kinds", "series", "items", "live")
 MODES = ("prerelease", "release")
 
 # Placeholder in a container's description that is replaced by the list of
 # the series' item names.
 CONTENTS_TOKEN = "{contents}"
+LISTING_TOKENS = (CONTENTS_TOKEN, "{contents_no_secret}", "{contents_secret}")
 
 DEFAULT_DESCRIPTION_TEMPLATE = "{description}\n\n{series_name} #{index}"
 
@@ -58,7 +60,8 @@ TEMPLATE_FIELDS = ("description", "series", "series_name", "index", "count", "co
                    "itemdefid", "name", "tags")
 
 # Tokens filled in in the descriptions of a series' containers.
-CONTAINER_TOKENS = ("{contents}", "{count}", "{count_no_secret}", "{count_secret}", "{series_name}")
+CONTAINER_TOKENS = ("{contents}", "{contents_no_secret}", "{contents_secret}", "{count}", "{count_no_secret}",
+                    "{count_secret}", "{series_name}")
 
 
 class ProjectError(Exception):
@@ -87,6 +90,7 @@ class Project:
                 "description_template": DEFAULT_DESCRIPTION_TEMPLATE,
                 "dummy_item": copy.deepcopy(DEFAULT_DUMMY_ITEM),
             },
+            "colors": {},
             "tables": {},
             "kinds": {},
             "series": {},
@@ -129,8 +133,8 @@ class Project:
 
     def _check_shape(self) -> None:
         d = self.data
-        if d.get("sisdefman") == 1:
-            d["sisdefman"] = FORMAT_VERSION  # version 2 only adds tables and kinds
+        if d.get("sisdefman") in (1, 2):
+            d["sisdefman"] = FORMAT_VERSION  # version 2 added tables and kinds, version 3 colors
         if d.get("sisdefman") != FORMAT_VERSION:
             raise ProjectError(f"unsupported project format version {d.get('sisdefman')!r}")
         if d.get("mode") not in MODES:
@@ -139,6 +143,7 @@ class Project:
         d["settings"].setdefault("description_template", DEFAULT_DESCRIPTION_TEMPLATE)
         d["settings"].setdefault("dummy_item", copy.deepcopy(DEFAULT_DUMMY_ITEM))
         d.setdefault("series", {})
+        d.setdefault("colors", {})
         d.setdefault("tables", {})
         d.setdefault("kinds", {})
         d.setdefault("items", [])
@@ -154,7 +159,7 @@ class Project:
             seen.add(it["itemdefid"])
             if "kind" in it and not isinstance(it["kind"], str):
                 raise ProjectError(f"itemdefid {it['itemdefid']}: kind must be a string")
-        for field in ("tables", "kinds"):
+        for field in ("colors", "tables", "kinds"):
             if not isinstance(d[field], dict):
                 raise ProjectError(f"{field} must be an object keyed by name")
         if not isinstance(d["series"], dict):
@@ -208,6 +213,14 @@ class Project:
     @property
     def live(self) -> Optional[dict]:
         return self.data.get("live")
+
+    @property
+    def colors(self) -> Dict[str, str]:
+        return self.data["colors"]
+
+    def resolve_colors(self, item: dict) -> List[str]:
+        """Replace ``@keyword`` colours in ``item`` with their hex values."""
+        return colors.resolve_item(self.colors, item)
 
     @property
     def tables(self) -> Dict[str, dict]:
@@ -437,8 +450,13 @@ class Project:
                 if gid in out:
                     out[gid]["bundle"] = self.generator_bundle(key, rule, out)
             count = len(members)
-            secret = positions[members[0]["itemdefid"]].count_secret if members else 0
-            tokens = {"{contents}": None, "{count}": str(count), "{count_no_secret}": str(count - secret),
+            secret_ids = set(self.secret_ids(key)) if members else set()
+            secret = len(secret_ids)
+            names = [(m["itemdefid"] in secret_ids, out[m["itemdefid"]].get("name", "")) for m in members]
+            tokens = {"{contents}": None,
+                      "{contents_no_secret}": "\n".join(n for is_secret, n in names if not is_secret),
+                      "{contents_secret}": "\n".join(n for is_secret, n in names if is_secret),
+                      "{count}": str(count), "{count_no_secret}": str(count - secret),
                       "{count_secret}": str(secret), "{series_name}": self.series_name(key)}
             for cid in self.container_ids(key):
                 c = out.get(cid)
@@ -455,6 +473,10 @@ class Project:
             for i in range(s["first_id"], top + 1):
                 if i not in out:
                     out[i] = self.make_dummy(i)
+        for i, item in out.items():
+            found = self.resolve_colors(item)
+            if found:
+                problems.setdefault(i, []).extend(found)
         return [out[i] for i in sorted(out)], problems
 
     def export_document(self) -> dict:

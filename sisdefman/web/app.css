@@ -296,3 +296,15 @@ table.edit.wide input { min-width: 120px; }
 @media (max-width: 720px) {
   .recent-open { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* ------------------------------------------------------------ colours */
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border);
+  vertical-align: -1px; margin-right: 6px; flex: none; }
+.swatch.big { width: 26px; height: 26px; border-radius: 5px; margin: 0; vertical-align: middle; }
+.swatch.none { background: repeating-linear-gradient(45deg, transparent 0 3px, var(--border) 3px 5px); }
+.color-input { display: flex; align-items: center; gap: 0; }
+.color-input input { flex: 1; min-width: 0; }
+input[type=color] { width: 36px; height: 30px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); cursor: pointer; }
+.nav.add { color: var(--muted); font-size: 13px; }
+.nav.add:hover { color: var(--accent); }

@@ -18,6 +18,10 @@ the command line, and it exports one Steam-ready JSON file.
   players may already own shows a warning and needs explicit confirmation.
 - **Dummy placeholders.** IDs a series no longer uses are exported as dummy items, so an old
   definition never lingers on Steam.
+- **Standard colours.** Define each colour once by keyword (`@rare`) and use the keyword
+  wherever a colour goes.
+- **New series in one step.** A new series can start as a copy of another series' crate,
+  generators and exchange recipes, with IDs, references and names moved over.
 
 ## Install
 
@@ -85,8 +89,11 @@ project. The list of recent projects is kept in `recent.json` in your settings f
   remove items.
 - **Item kinds and Lookup tables.** Edit the rules and tables. Previews update as you type.
   **Import CSV…** brings in reference data such as an Unreal DataTable export (below).
+- **Colors.** The colour palette, with swatches, the number of values using each colour and
+  **Convert existing colours…** (see [Colours](#colours)).
 - **Series setup.** Set each series' ID range, display name, description template, crates
-  and generators.
+  and generators. **+ New series** (also in the sidebar) creates a series, empty or as a
+  copy of another one's setup (see [Creating a series](#creating-a-series)).
 - **Settings & export.**
   - Switch between prerelease and release mode.
   - Record the live baseline.
@@ -263,6 +270,42 @@ The imported columns can then be used like any other:
 In the GUI, use **Lookup tables → Import CSV…**. Columns that look like class references
 start unticked there.
 
+## Colours
+
+The project has a **palette** of standard colours, each with a keyword:
+
+```jsonc
+"colors": { "common": "d2d2d2", "uncommon": "5e90e0", "rare": "eb7ce9", "epic": "f08f35", "background": "292929" }
+```
+
+A colour field (`name_color`, `background_color`, or any other field ending in `_color`)
+can then hold `@keyword` instead of a hex value. On export it becomes the palette's hex
+value, so changing a colour in the palette changes every item that uses it. Keywords work
+everywhere a colour is stored:
+
+- on an item: `sisdefman set 110 name_color=@rare`;
+- in a lookup table: `rarity.color = @rare`, used by a rule such as `"name_color": "{rarity.color}"`;
+- in a kind's rule: `"background_color": "@background"`, or even `"name_color": "@{rarity}"`;
+- in the dummy item.
+
+**Converting.** `sisdefman colors convert` (or **Colors → Convert existing colours…** in the
+GUI) puts every hex colour of the project into the palette and replaces it with its
+keyword. The export does not change. Keywords are named after what uses the colour: a lookup
+table row (`common`), a tag shared by the items using it (`rarity:epic` gives `epic`),
+`background`, `white`/`black`, or else the hex value (`color_1a2b3c`). Rename any of them
+afterwards; references follow.
+
+```sh
+sisdefman colors                         # the palette, with swatches and usage counts
+sisdefman colors convert -n              # preview the conversion
+sisdefman colors set legendary ffd700    # add or change a colour
+sisdefman colors rename epic secret_rare # renames every @epic too
+sisdefman colors delete legendary        # refused while in use (--force to delete anyway)
+```
+
+`check` reports keywords missing from the palette. Changing a colour only restyles the
+items that use it, so release mode doesn't ask for confirmation: players keep the same items.
+
 ## Database-style commands
 
 ```sh
@@ -314,13 +357,25 @@ From definitions laid out like the table below, `import` sets up the following:
 
 If a crate's list is out of date, the import prints the difference.
 
+In prerelease mode the items of a series don't have to be consecutive. The import still
+sets up the series and warns about each discontinuity:
+
+- other definitions between its items (they join the series; `check` then reports that
+  they lack its `series:` tag);
+- unused IDs inside it (exported as dummy items);
+- an item tagged with the series but far from the rest (left out; add it with
+  `sisdefman series set KEY --container ID` if it is the crate).
+
+In release mode such a series is not set up automatically; create it with
+`sisdefman series new`.
+
 ### What is generated on export
 
 | What | Stored in the project as | Exported as |
 | --- | --- | --- |
 | Items of a kind | the kind's fields and any overrides | the kind's rules applied |
 | Descriptions of series items | the plain description (or the kind's rule) | the series line added (below) |
-| Descriptions of containers (crates) | text containing `{contents}` | `{contents}` replaced by the names of the series' items, one per line, leaving out items with an `exclude` tag; `{count}`, `{count_no_secret}`, `{count_secret}` and `{series_name}` filled in |
+| Descriptions of containers (crates) | text containing `{contents}` (or `{contents_no_secret}` / `{contents_secret}`) | the names of the series' items, one per line: `{contents}` leaves out items with an `exclude` tag, `{contents_no_secret}` leaves out the secret rares, `{contents_secret}` lists only the secret rares; `{count}`, `{count_no_secret}`, `{count_secret}` and `{series_name}` filled in |
 | Bundles of the generators listed in a series' `generators` | a tag rule, e.g. `rarity:common` | every series item with that tag, in series order |
 | Unused IDs from `first_id` to `allocated_through` | nothing | dummy items built from `settings.dummy_item` |
 
@@ -364,15 +419,58 @@ By default the secret rares are the items the series' crate leaves out of its li
 `sisdefman series set crate1 --secret rarity:epic`, or the Series setup page; `--secret ""`
 goes back to the default. `sisdefman list` shows the split, e.g. `25 items (15 + 10 secret)`.
 
-A crate's description can use the counts too:
+A crate's description can use the counts, and list the items with or without the secret
+rares:
+
+| Keyword | Lists |
+| --- | --- |
+| `{contents}` | every item except those with one of the container's `exclude` tags |
+| `{contents_no_secret}` | every item except the secret rares |
+| `{contents_secret}` | only the secret rares |
 
 ```text
 Contains one of {count_no_secret} appearances from the {series_name}.
 
-{contents}
+{contents_no_secret}
 
 ...or one of {count_secret} Secret Rare Special Appearances!
 ```
+
+### Creating a series
+
+```sh
+sisdefman series new crate3 --name "Third Series" --copy-from crate2 -n   # preview
+sisdefman series new crate3 --name "Third Series" --copy-from crate2
+sisdefman series new crate3 --name "Third Series" --first-id 310 --last-id 396   # empty
+```
+
+The ID range defaults to the next block after the last series, of the same size (crate 2 at
+210-296 gives 310-396). With `--copy-from`, the new series gets a copy of the other series'
+setup, but none of its items:
+
+- **What is copied:** its containers and generators, and the other definitions in its ID
+  block (e.g. 200-299): exchange entry points, trade-up recipes, root and overlay
+  generators. Definitions that something outside the block also uses (a shared tag
+  generator, say) are not copied unless you choose them with `--copy-ids`.
+- **New IDs:** each copy keeps its place in the block (205 → 305). A container gets the
+  next free ID after the original (crate 2 → 3); `--new-id 2=50` picks another one.
+- **What changes in the copies:**
+  - references between them (`bundle`, `exchange`, `tag_generators`);
+  - `series:crate2` in tags and exchange recipes becomes `series:crate3`;
+  - text: `Crate 2` → `Crate 3`, `crate_2` → `crate_3`, `Second Series` → `Third Series`
+    and `Second` → `Third` are worked out from the keys and names; add more with
+    `--replace FIND=REPLACE`.
+- **What is set up:** the copied containers and generators become the new series'
+  containers and generators. Its description template and secret-rare rule are copied too.
+
+Nothing that already exists changes, so this needs no confirmation in release mode. A
+definition outside the block that should also grant the new crate (a playtime drop, say) is
+left for you to edit.
+
+In the GUI, **+ New series** fills in the next key and ID block, and starts from a copy of
+the last series. The **Start from** card lists every definition it will copy, with its new
+ID. Untick definitions, change their new IDs or edit the text replacements there, or choose
+**An empty series** to set up containers and generators yourself.
 
 ### Adding, inserting, moving and removing items
 
@@ -450,7 +548,8 @@ the next free one. Appending is always safe.
 | `adopt KIND IDS` / `detach IDS` | convert items to a kind and back |
 | `schema [export \| import FILE]` | show, export or import tables and kinds |
 | `table [show \| new \| set \| delete \| rename \| import]` | edit lookup tables; import CSV reference data |
-| `series [new \| set]` | show or configure series (range, name, template, secret rares, containers, generators) |
+| `series [new \| set]` | show, create (empty or `--copy-from` another series) or configure series (range, name, template, secret rares, containers, generators) |
+| `colors [set \| rename \| delete \| convert]` | show or edit the colour palette; convert hex colours to it |
 | `template [TEXT]` | show or set the series line |
 | `mode [prerelease \| release]` / `mark-live` / `diff [--against FILE]` | release protection |
 
@@ -458,13 +557,14 @@ the next free one. Appending is always safe.
 
 ```jsonc
 {
-    "sisdefman": 2,
+    "sisdefman": 3,
     "appid": 480,
     "mode": "prerelease",
     "settings": {
         "description_template": "{description}\n\n{series_name} #{index}",
-        "dummy_item": { "type": "item", "name": "Dummy Item #{itemdefid}", "description": "This is a dummy item.", ... }
+        "dummy_item": { "type": "item", "name": "Dummy Item #{itemdefid}", "name_color": "@common", ... }
     },
+    "colors": { "common": "d2d2d2", "background": "292929", ... },   // the palette (see above)
     "tables": { ... },                    // lookup tables (see above)
     "kinds": { ... },                     // item kinds (see above)
     "series": {
@@ -492,7 +592,7 @@ the next free one. Appending is always safe.
   list goes.
 - Dummy items inside a series' range are not stored.
 - The project file can be edited by hand. `sisdefman check` reports mistakes.
-- Version 1 project files are upgraded automatically.
+- Older project files (versions 1 and 2) are upgraded automatically.
 
 ## Development
 

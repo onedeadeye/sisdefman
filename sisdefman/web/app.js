@@ -52,6 +52,41 @@ function show(v) {
   if (v === undefined || v === null) return "";
   return typeof v === "string" ? v : JSON.stringify(v);
 }
+const isColorField = (name) => name === "name_color" || name === "background_color" || /_color$/.test(name || "");
+const isColorColumn = (name) => /colou?r/i.test(name || "");
+
+/* "#rrggbb" for a hex colour or an @keyword of the palette, else null. */
+function colorOf(value) {
+  if (typeof value !== "string") return null;
+  const m = /^@([A-Za-z_][\w-]*)$/.exec(value);
+  const hex = m ? (S.colors || {})[m[1]] : value;
+  return /^[0-9a-fA-F]{6}$/.test(hex || "") ? "#" + hex : null;
+}
+
+function swatch(value, big) {
+  const c = colorOf(value);
+  return h("span", { class: "swatch" + (big ? " big" : "") + (c ? "" : " none"), style: c ? `background:${c}` : null,
+    title: c ? `${value} = ${c}` : (value ? `${value}: not a colour` : "") });
+}
+
+function paletteList() {
+  return h("datalist", { id: "palette-keywords" },
+    Object.entries(S.colors || {}).map(([k, v]) => h("option", { value: "@" + k }, v)));
+}
+
+/* A text input for a colour value: @keyword suggestions and a live swatch. */
+function colorInput(value, onChange, attrs) {
+  const sw = swatch(value);
+  const input = h("input", { type: "text", class: "mono", list: "palette-keywords", value: value ?? "", ...(attrs || {}) });
+  input.addEventListener("input", () => {
+    const c = colorOf(input.value);
+    sw.style.background = c || "";
+    sw.classList.toggle("none", !c);
+    onChange(input.value);
+  });
+  return h("div", { class: "color-input" }, sw, input);
+}
+
 function toast(text, error) {
   const el = h("div", { class: "toast" + (error ? " error" : "") }, text);
   document.getElementById("toasts").append(el);
@@ -261,12 +296,15 @@ function renderSidebar() {
     nav("All items", counts.all, scopeIs("all"), setScope("all")),
     Object.entries(S.series).map(([key, s]) =>
       nav(s.display_name, s.members.length, scopeIs("series", key), setScope("series", key))),
+    h("button", { class: "nav add", onclick: () => { if (!leaveDraft()) return; ui.seriesSel = "__new__"; ui.seriesDraft = null; go("series"); } },
+      h("span", {}, "+ New series")),
     nav("Other definitions", counts.other, scopeIs("other"), setScope("other")),
     Object.keys(S.kinds).length ? h("h4", {}, "By kind") : null,
     Object.keys(S.kinds).map((k) => nav(k, kindCounts[k] || 0, scopeIs("kind", k), setScope("kind", k))),
     h("h4", {}, "Schema"),
     nav("Item kinds", Object.keys(S.kinds).length, ui.page === "kinds", () => go("kinds")),
     nav("Lookup tables", Object.keys(S.tables).length, ui.page === "tables", () => go("tables")),
+    nav("Colors", Object.keys(S.colors).length, ui.page === "colors", () => go("colors")),
     h("h4", {}, "Project"),
     nav("Series setup", Object.keys(S.series).length, ui.page === "series", () => go("series")),
     nav("Settings & export", null, ui.page === "settings", () => go("settings")),
@@ -274,7 +312,7 @@ function renderSidebar() {
 }
 
 function renderPage() {
-  const pages = { items: renderItemsPage, kinds: renderKindsPage, tables: renderTablesPage,
+  const pages = { items: renderItemsPage, kinds: renderKindsPage, tables: renderTablesPage, colors: renderColorsPage,
     series: renderSeriesPage, settings: renderSettingsPage, check: renderCheckPage };
   return (pages[ui.page] || renderItemsPage)();
 }
@@ -286,7 +324,7 @@ const launch = { listing: null, loading: false, checked: new Set(), filename: "s
 function resetUi() {
   Object.assign(ui, {
     page: "items", scope: { type: "all" }, search: "", selected: null, draft: null, menuOpen: false,
-    kindSel: null, kindDraft: null, tableSel: null, tableDraft: null, seriesSel: null, seriesDraft: null,
+    kindSel: null, kindDraft: null, tableSel: null, tableDraft: null, seriesSel: null, seriesDraft: null, colorDraft: null,
   });
   ui.checked.clear();
   launch.listing = null;
@@ -507,7 +545,8 @@ function renderGridOnly(list) {
     h("td", { class: "cb" }, cb),
     inSeries ? h("td", { class: "num" }, e.index ?? "") : null,
     h("td", { class: "id" }, e.id),
-    h("td", {}, e.dummy ? "unused slot (exported as a dummy item)" : e.item.name || h("span", { class: "hint" }, "(no name)")),
+    h("td", {}, e.dummy ? "unused slot (exported as a dummy item)" : [e.item.name_color ? swatch(e.item.name_color) : null,
+      e.item.name || h("span", { class: "hint" }, "(no name)")]),
     h("td", {}, e.record && e.record.kind ? h("span", { class: "badge accent" }, e.record.kind) : ""),
     h("td", { class: "hint" }, e.item.type || ""),
     h("td", { class: "flags" }, flags));
@@ -709,7 +748,8 @@ function updatePreviewDom() {
     h("ul", {}, probs.map((x) => h("li", {}, x)))) : "");
   for (const [field, el] of Object.entries(refs.derivedValues || {})) {
     const overridden = field in d.record;
-    el.textContent = overridden ? "Rule gives: " + show(p.rules[field]) : show(p.item[field]);
+    const value = overridden ? p.rules[field] : p.item[field];
+    el.replaceChildren(...(isColorField(field) ? [swatch(value)] : []), (overridden ? "Rule gives: " : "") + show(value));
   }
 }
 
@@ -760,7 +800,7 @@ function renderEditorPanel() {
   } else {
     body.push(h("div", { class: "section" }, h("h5", {}, "Steam fields"), kvEditor(rec, new Set(["itemdefid"]))));
   }
-  body.push(h("div", { class: "section" }, h("h5", {}, "Exported definition"), refs.json));
+  body.push(h("div", { class: "section" }, h("h5", {}, "Exported definition"), refs.json), paletteList());
 
   refs.saveBtn = h("button", { class: "btn primary", disabled: !d.dirty, onclick: saveDraft },
     d.mode === "create" ? "Add item" : "Save");
@@ -916,6 +956,7 @@ function valueEditor(value, onChange, name) {
     });
     return ta;
   }
+  if (isColorField(name)) return colorInput(value, onChange);
   const lines = String(value).split("\n").length;
   const long = name === "description" || lines > 1 || String(value).length > 60;
   const ta = h("textarea", { rows: long ? Math.min(10, Math.max(3, lines + 1)) : 1, oninput: (ev) => onChange(ev.target.value) });
@@ -1256,9 +1297,11 @@ function renderTablesPage() {
 
   const rows = d.rows.map((r, n) => h("tr", {},
     h("td", {}, h("input", { type: "text", class: "mono", value: r.key, oninput: (ev) => { r.key = ev.target.value; } })),
-    d.columns.map((c) => h("td", {}, h("input", { type: "text", value: r.values[c] ?? "", oninput: (ev) => {
-      if (ev.target.value === "") delete r.values[c]; else r.values[c] = ev.target.value;
-    } }))),
+    d.columns.map((c) => {
+      const set = (v) => { if (v === "") delete r.values[c]; else r.values[c] = v; };
+      return h("td", {}, isColorColumn(c) ? colorInput(r.values[c] ?? "", set)
+        : h("input", { type: "text", value: r.values[c] ?? "", oninput: (ev) => set(ev.target.value) }));
+    }),
     h("td", { class: "narrow hint" }, r.orig && used[r.orig] ? plural(used[r.orig], "item") : ""),
     h("td", { class: "narrow" }, h("button", { class: "btn icon", onclick: () => { d.rows.splice(n, 1); render(); } }, "✕"))));
 
@@ -1301,7 +1344,8 @@ function renderTablesPage() {
           h("div", { class: "hscroll" }, h("table", { class: "edit wide" },
             h("thead", {}, h("tr", {}, h("th", {}, "Key"), d.columns.map((c) => h("th", {}, c)), h("th", {}, "Items"), h("th", {}))),
             h("tbody", {}, rows))),
-          h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.rows.push({ key: "", orig: null, values: {} }); render(); } }, "+ Row")),
+          h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.rows.push({ key: "", orig: null, values: {} }); render(); } }, "+ Row"),
+          paletteList()),
         h("div", { class: "row" },
           h("button", { class: "btn primary", onclick: save }, d.old ? "Save table" : "Create table"),
           d.old ? h("button", { class: "btn", onclick: () => { ui.tableDraft = null; render(); } }, "Revert") : null,
@@ -1431,11 +1475,95 @@ async function importCsvDialog(defaultTable) {
   }
 }
 
+/* ------------------------------------------------------------ colors page */
+
+function renderColorsPage() {
+  if (!ui.colorDraft) ui.colorDraft = { rows: Object.entries(S.colors).map(([kw, hex]) => ({ kw, orig: kw, hex })) };
+  const d = ui.colorDraft;
+  const rows = d.rows.map((r, n) => {
+    const big = swatch(r.hex, true);
+    const hexInput = h("input", { type: "text", class: "mono", value: r.hex, maxlength: 7, style: "width:100px" });
+    const picker = h("input", { type: "color", value: colorOf(r.hex) || "#ffffff", title: "Pick a colour" });
+    const refresh = () => {
+      const c = colorOf(r.hex);
+      big.style.background = c || "";
+      big.classList.toggle("none", !c);
+      hexInput.classList.toggle("invalid", !c);
+      if (c) picker.value = c.toLowerCase();
+    };
+    hexInput.addEventListener("input", () => { r.hex = hexInput.value.trim().replace(/^#/, ""); refresh(); });
+    picker.addEventListener("input", () => { r.hex = picker.value.slice(1); hexInput.value = r.hex; refresh(); });
+    const used = r.orig ? (S.color_usage[r.orig] || 0) : 0;
+    return h("tr", {},
+      h("td", { class: "narrow" }, big),
+      h("td", {}, h("div", { class: "row" }, h("span", { class: "mono hint" }, "@"),
+        h("input", { type: "text", class: "mono", value: r.kw, oninput: (ev) => { r.kw = ev.target.value.trim().replace(/^@/, ""); } }))),
+      h("td", { class: "narrow" }, h("div", { class: "row" }, hexInput, picker)),
+      h("td", { class: "narrow hint" }, used ? plural(used, "use") : "unused"),
+      h("td", { class: "narrow" }, h("button", {
+        class: "btn icon", disabled: used > 0, title: used ? "Used by values; change them first" : "Remove",
+        onclick: () => { d.rows.splice(n, 1); render(); },
+      }, "✕")));
+  });
+
+  const save = async () => {
+    const palette = {}, renames = {};
+    for (const r of d.rows) {
+      if (!/^[A-Za-z_][\w-]*$/.test(r.kw)) { toast(`"${r.kw}" is not a valid keyword (letters, digits, _ and -).`, true); return; }
+      if (r.kw in palette) { toast(`Two colours are called ${r.kw}.`, true); return; }
+      if (!colorOf(r.hex)) { toast(`${r.kw}: "${r.hex}" is not a six-digit hex colour.`, true); return; }
+      palette[r.kw] = r.hex;
+      if (r.orig && r.orig !== r.kw) renames[r.orig] = r.kw;
+    }
+    if (await mutate("colors/save", { colors: palette, renames }, "Saved the palette.")) { ui.colorDraft = null; render(); }
+  };
+
+  const convert = async () => {
+    let report;
+    try { report = (await request("colors/convert", { dry_run: true })).result; } catch (e) { toast(e.message, true); return; }
+    const ok = await modal({
+      title: "Convert colours to the palette",
+      body: h("div", { class: "stack" },
+        h("p", {}, "Every hex colour in items, lookup tables, kind rules and the dummy item is put in the palette and replaced by its @keyword. The exported definitions do not change."),
+        h("div", { class: "files" }, Object.entries(report.by_keyword).map(([kw, count]) => {
+          const hex = report.created[kw] || report.reused[kw];
+          return h("div", { class: "file-row" }, swatch(hex), h("span", { class: "fname mono" }, "@" + kw),
+            h("span", { class: "mono hint" }, hex), h("span", { class: "hint" }, `${plural(count, "value")}${kw in report.reused ? " (existing)" : ""}`));
+        })),
+        h("p", { class: "hint" }, "You can rename the keywords afterwards; references follow.")),
+      actions: [{ label: "Cancel", value: false }, { label: "Convert", value: true, class: "primary", disabled: !report.replaced }],
+    });
+    if (ok && await mutate("colors/convert", {}, (r) => `Converted ${plural(r.replaced, "colour value")}.`)) { ui.colorDraft = null; render(); }
+  };
+
+  return h("div", { class: "page" },
+    h("h2", {}, "Colors"),
+    h("p", { class: "lead" }, "Standard colours, defined once. A colour field (name_color, background_color…) can say @keyword instead of a hex value, on an item, in a lookup table (rarity.color = @rare) or in a kind's rule (background_color = @background). Exports use the hex value, so changing a colour here changes every item that uses it."),
+    S.hex_colors_left ? h("div", { class: "card" },
+      h("div", { class: "row" },
+        h("div", { class: "grow" }, h("b", {}, plural(S.hex_colors_left, "colour value")), " still use hex. Convert them to put each colour in the palette once."),
+        h("button", { class: "btn primary", onclick: convert }, "Convert existing colours…"))) : null,
+    h("div", { class: "card", style: "max-width:720px" },
+      d.rows.length ? h("table", { class: "edit" },
+        h("thead", {}, h("tr", {}, h("th", {}), h("th", {}, "Keyword"), h("th", {}, "Colour"), h("th", {}, "Used by"), h("th", {}))),
+        h("tbody", {}, rows)) : h("p", { class: "hint" }, "No colours yet."),
+      h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { class: "btn small", onclick: () => { d.rows.push({ kw: `color${d.rows.length + 1}`, orig: null, hex: "ffffff" }); render(); } }, "+ Colour"),
+        h("span", { style: "flex:1" }),
+        h("button", { class: "btn", onclick: () => { ui.colorDraft = null; render(); } }, "Revert"),
+        h("button", { class: "btn primary", onclick: save }, "Save palette"))));
+}
+
 /* ------------------------------------------------------------ series page */
 
 function makeSeriesDraft(key) {
   if (!key || key === "__new__") {
-    return { for: key, is_new: true, key: "", name: "", first_id: "", last_id: "", template: "", secret: "", containers: [], generators: [] };
+    const sug = S.new_series || {};
+    return {
+      for: key, is_new: true, key: sug.key || "", name: "", first_id: sug.first_id ?? "", last_id: sug.last_id ?? "",
+      template: "", secret: "", containers: [], generators: [],
+      copy: { source: sug.source || "", plan: null, planFor: null, error: null, edited: false, ticked: new Set(), newIds: {}, replacements: [] },
+    };
   }
   const s = S.series[key];
   return {
@@ -1445,6 +1573,75 @@ function makeSeriesDraft(key) {
     containers: Object.entries(s.containers || {}).map(([id, cfg]) => ({ id, exclude: ((cfg || {}).exclude || []).join(", ") })),
     generators: Object.entries(s.generators || {}).map(([id, rule]) => ({ id, rule })),
   };
+}
+
+/* The "Start from" card of a new series: empty, or a copy of another series' setup. */
+function renderStartFrom(d) {
+  const c = d.copy;
+  const sel = h("select", { onchange: (ev) => { c.source = ev.target.value; c.plan = null; c.edited = false; render(); if (c.source) refreshPlan(d); } },
+    h("option", { value: "" }, "An empty series"),
+    Object.entries(S.series).map(([k, s]) => h("option", { value: k }, `A copy of the setup of ${s.display_name} (${k})`)));
+  sel.value = c.source;
+  refs.planBox = h("div");
+  if (c.source && !c.plan && !c.error) setTimeout(() => refreshPlan(d), 0);
+  else fillPlanBox(d);
+  return h("div", { class: "card" },
+    h("h3", {}, "Start from"),
+    h("div", { class: "field" }, sel),
+    c.source ? h("p", { class: "hint" }, "Its crate, generators and other definitions in its ID block are copied to the new series' block. References between them follow, series tags change to the new key and the text below is replaced. The new series starts without items.") : null,
+    refs.planBox);
+}
+
+const planArgs = (d) => JSON.stringify({ source: d.copy.source, key: d.key.trim(), name: d.name.trim(), first_id: Number(d.first_id) });
+
+async function loadPlan(d) {
+  const c = d.copy;
+  const args = planArgs(d);
+  const plan = (await request("series/plan", JSON.parse(args))).result;
+  c.plan = plan;
+  c.planFor = args;
+  c.error = null;
+  c.ticked = new Set(plan.candidates.filter((x) => x.copy).map((x) => x.id));
+  c.newIds = Object.fromEntries(plan.candidates.map((x) => [x.id, x.new_id]));
+  c.replacements = plan.replacements.map((r) => [...r]);
+}
+
+const refreshPlan = debounce(async (d) => {
+  const c = d.copy;
+  if (!c.source || ui.seriesDraft !== d) return;
+  try { await loadPlan(d); } catch (e) { c.plan = null; c.error = e.message; }
+  if (ui.seriesDraft === d) fillPlanBox(d);
+}, 300);
+
+function fillPlanBox(d) {
+  const c = d.copy;
+  if (!refs.planBox || !c.source) return;
+  if (c.error) { refs.planBox.replaceChildren(h("div", { class: "problems" }, c.error)); return; }
+  if (!c.plan) { refs.planBox.replaceChildren(h("p", { class: "hint" }, "Working out what to copy…")); return; }
+  const edited = () => { c.edited = true; };
+  const rows = c.plan.candidates.map((x) => h("tr", {},
+    h("td", { class: "narrow" }, h("input", { type: "checkbox", checked: c.ticked.has(x.id),
+      onchange: (ev) => { ev.target.checked ? c.ticked.add(x.id) : c.ticked.delete(x.id); edited(); } })),
+    h("td", { class: "narrow mono" }, x.id), h("td", { class: "narrow hint" }, "→"),
+    h("td", { class: "narrow" }, h("input", { type: "number", value: c.newIds[x.id], style: "width:100px",
+      oninput: (ev) => { c.newIds[x.id] = Number(ev.target.value); edited(); } })),
+    h("td", {}, x.name, x.role ? h("span", { class: "badge accent", style: "margin-left:6px" }, x.role) : null,
+      x.note ? h("div", { class: "hint" }, x.note) : null)));
+  const reps = c.replacements.map((r, n) => h("div", { class: "row", style: "margin-bottom:6px" },
+    h("input", { type: "text", value: r[0], placeholder: "find", oninput: (ev) => { r[0] = ev.target.value; edited(); } }),
+    h("span", {}, "→"),
+    h("input", { type: "text", value: r[1], placeholder: "replace with", oninput: (ev) => { r[1] = ev.target.value; edited(); } }),
+    h("button", { class: "btn icon", onclick: () => { c.replacements.splice(n, 1); edited(); fillPlanBox(d); } }, "✕")));
+  refs.planBox.replaceChildren(h("div", {},
+    h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}), h("th", {}, "ID"), h("th", {}), h("th", {}, "New ID"), h("th", {}, "Definition"))),
+      h("tbody", {}, rows)),
+    h("h3", { style: "margin-top:14px" }, "Replace text in the copies"),
+    reps,
+    h("div", { class: "row" },
+      h("button", { class: "btn small", onclick: () => { c.replacements.push(["", ""]); edited(); fillPlanBox(d); } }, "+ Replacement"),
+      h("span", { style: "flex:1" }),
+      c.edited ? h("button", { class: "btn small", title: "Work the list out again from the key, name and first ID",
+        onclick: () => { c.edited = false; refreshPlan(d); } }, "Start the list over") : null)));
 }
 
 function renderSeriesPage() {
@@ -1461,7 +1658,11 @@ function renderSeriesPage() {
   const outside = S.items.filter((e) => !e.dummy && !e.series);
   const options = (filter) => [h("option", { value: "" }, "—"),
     outside.filter(filter).map((e) => h("option", { value: e.id }, `${e.id}: ${e.item.name || "(no name)"}`))];
-  const input = (key, attrs) => h("input", { type: "text", value: d[key], ...attrs, oninput: (ev) => { d[key] = ev.target.value; } });
+  const input = (key, attrs) => h("input", { type: "text", value: d[key], ...attrs, oninput: (ev) => {
+    d[key] = ev.target.value;
+    if (d.is_new && ["key", "name", "first_id"].includes(key) && d.copy.source && !d.copy.edited) refreshPlan(d);
+  } });
+  const copying = d.is_new && d.copy.source;
 
   const containerRows = d.containers.map((c, n) => {
     const sel = h("select", { onchange: (ev) => { c.id = ev.target.value; } }, options(() => true));
@@ -1478,7 +1679,30 @@ function renderSeriesPage() {
       h("td", { class: "narrow" }, h("button", { class: "btn icon", onclick: () => { d.generators.splice(n, 1); render(); } }, "✕")));
   });
 
+  const create = async () => {
+    const key = d.key.trim();
+    const config = { name: d.name.trim(), first_id: Number(d.first_id), last_id: Number(d.last_id) };
+    if (d.template) config.description_template = d.template;
+    if (d.secret.trim()) config.secret = d.secret.trim();
+    const c = d.copy;
+    if (!c.edited && c.planFor !== planArgs(d)) {  // typed faster than the list followed
+      try { await loadPlan(d); } catch (e) { toast(e.message, true); return; }
+      fillPlanBox(d);
+    }
+    if (!c.plan) { toast("Wait for the list of definitions to copy.", true); return; }
+    const body = { key, config, copy: { source: c.source, ids: [...c.ticked], new_ids: c.newIds,
+      replacements: c.replacements.filter((r) => r[0]) } };
+    const r = await mutate("series/create", body, `Created series ${key}.`);
+    if (r) {
+      ui.seriesSel = key; ui.seriesDraft = null; render();
+      modal({ title: `Created series ${key}`, body: h("div", {},
+        h("p", {}, `${plural(r.created.length, "definition")} copied from ${c.source}:`),
+        h("pre", { class: "json" }, r.created.map((x) => `${x.old} -> ${x.new}  ${x.name}`).join("\n")),
+        (r.notes || []).map((n) => h("p", { class: "hint" }, n))) });
+    }
+  };
   const save = async () => {
+    if (copying) return create();
     const config = {
       name: d.name.trim(), last_id: Number(d.last_id),
       description_template: d.template,
@@ -1501,14 +1725,14 @@ function renderSeriesPage() {
 
   return h("div", { class: "page" },
     h("h2", {}, "Series setup"),
-    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it, and that number is written into their descriptions. Containers get a list of the series' items at {contents}, and can use {count}, {count_no_secret}, {count_secret} and {series_name}; generators listed here always hold every series item with the given tags."),
+    h("p", { class: "lead" }, "A series is a range of itemdefids. Items are numbered by their position in it, and that number is written into their descriptions. Containers get a list of the series' items at {contents} (or {contents_no_secret} / {contents_secret}: without / only the secret rares), and can use {count}, {count_no_secret}, {count_secret} and {series_name}; generators listed here always hold every series item with the given tags."),
     h("div", { class: "two-pane" }, list,
       h("div", {},
         h("div", { class: "card" },
           h("div", { class: "row" },
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Key"), h("span", {}, "as in the series: tag")),
               input("key", { class: "mono", disabled: !d.is_new, placeholder: "e.g. crate3" })),
-            h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Display name")), input("name", { placeholder: "e.g. Gamma Series" }))),
+            h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Display name")), input("name", { placeholder: "e.g. Third Series" }))),
           h("div", { class: "row" },
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "First ID")), input("first_id", { type: "number", disabled: !d.is_new })),
             h("div", { class: "field grow" }, h("div", { class: "label" }, h("b", {}, "Last ID"), h("span", {}, "room to grow")), input("last_id", { type: "number" }))),
@@ -1518,11 +1742,12 @@ function renderSeriesPage() {
           input("secret", { class: "mono", placeholder: s && !("secret" in s) && s.secret_rules.length ? s.secret_rules.join(", ") + " (from the containers)" : "e.g. rarity:epic" })),
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Description template"), h("span", {}, "empty = the global one")),
             (() => { const ta = h("textarea", { rows: 2, class: "mono", placeholder: S.settings.description_template, oninput: (ev) => { d.template = ev.target.value; } }); ta.value = d.template; return ta; })())),
-        h("div", { class: "card" },
+        d.is_new ? renderStartFrom(d) : null,
+        copying ? null : h("div", { class: "card" },
           h("h3", {}, "Containers"),
           h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}, "Definition"), h("th", {}, "Leave out items tagged"), h("th", {}))), h("tbody", {}, containerRows)),
           h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.containers.push({ id: "", exclude: "" }); render(); } }, "+ Container")),
-        h("div", { class: "card" },
+        copying ? null : h("div", { class: "card" },
           h("h3", {}, "Generators"),
           h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}, "Generator"), h("th", {}, "Every series item tagged"), h("th", {}))), h("tbody", {}, generatorRows)),
           h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.generators.push({ id: "", rule: "" }); render(); } }, "+ Generator")),

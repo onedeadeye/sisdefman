@@ -146,24 +146,44 @@ def _detect_series(project: Project, key: str, report: Report) -> None:
         return
 
     member_ids = sorted(m["itemdefid"] for m in members)
-    first, high = member_ids[0], member_ids[-1]
-    foreign = [
-        i for i in range(first, high + 1)
-        if i in by_id and i not in member_ids and not project.is_dummy(by_id[i])
-    ]
-    if foreign:
-        shown = ", ".join(map(str, foreign[:8])) + (" ..." if len(foreign) > 8 else "")
+
+    def foreign_between(a: int, b: int) -> List[int]:
+        return [i for i in range(a + 1, b) if i in by_id and i not in member_set_all
+                and not project.is_dummy(by_id[i])]
+
+    member_set_all = set(member_ids)
+    clusters = _clusters(member_ids, foreign_between,
+                         lambda i: bool(set(steam.tag_values(by_id[i], "series")) - {key}))
+    core = max(clusters, key=len)
+    outliers = [i for c in clusters if c is not core for i in c]
+    first, high = core[0], core[-1]
+    foreign = foreign_between(first - 1, high + 1)
+
+    if (foreign or outliers) and project.mode == "release":
         report.warn(
-            f"series:{key}: IDs {first}-{high} also contain items without the tag ({shown}); "
-            "a series must be a run of consecutive IDs, so it was not set up. If a tagged item there is a "
-            "crate whose description does not list the items yet, create the series with "
-            f"`sisdefman series new {key} --first-id N --last-id N --container ID` instead."
+            f"series:{key}: its items are not one run of IDs (untagged definitions between them: "
+            f"{_short(foreign or outliers)}). In release mode it is not set up automatically; create it with "
+            f"`sisdefman series new {key} --first-id N --last-id N`."
         )
         return
     for other, s in project.series.items():
         if s["first_id"] <= high and first <= s["last_id"]:
             report.warn(f"series:{key}: IDs {first}-{high} overlap series {other!r}; not set up as a series")
             return
+    if foreign:
+        report.warn(
+            f"series:{key}: the definitions at {_short(foreign)} sit between its items without the series:{key} "
+            "tag. They count as items of the series; tag them, or move them out of IDs "
+            f"{first}-{high}."
+        )
+    if outliers:
+        report.warn(
+            f"series:{key}: {_short(outliers)} {'is' if len(outliers) == 1 else 'are'} tagged series:{key} but "
+            f"far from its other items (IDs {first}-{high}), so left out of the series. If one is the crate, add it "
+            f"with `sisdefman series set {key} --container ID` (or on the Series setup page)."
+        )
+    members = [m for m in members if first <= m["itemdefid"] <= high]
+    member_ids = [i for i in member_ids if first <= i <= high]
 
     through = high
     while project.is_dummy(by_id.get(through + 1)):
@@ -188,12 +208,15 @@ def _detect_series(project: Project, key: str, report: Report) -> None:
         "generators": {},
     }
     project.series[key] = config
-    holes = sum(1 for i in range(first, high + 1) if i not in member_ids)
+    holes = [i for i in range(first, high + 1) if i not in member_ids and i not in foreign]
     extra = f", {through - high} unused ID(s) after it" if through > high else ""
     report.info(
         f"series {key!r} ({name}): {len(members)} items at IDs {first}-{high}{extra}; "
-        f"room up to ID {last}" + (f"; {holes} gap(s) inside" if holes else "")
+        f"room up to ID {last}"
     )
+    if holes:
+        report.warn(f"series:{key}: IDs {_short(holes)} inside the series are unused; they are exported as dummy "
+                    "items")
     if not blockers:
         report.warn(f"series {key!r}: nothing follows it, so it has no room to grow. "
                     f"Set the end of its ID range with `sisdefman series set {key} --last-id N`.")
@@ -236,6 +259,39 @@ def _detect_series(project: Project, key: str, report: Report) -> None:
 
     for c in containers:
         _detect_listing(project, key, c, members, report)
+
+
+def _short(ids: List[int]) -> str:
+    ids = sorted(ids)
+    return ", ".join(map(str, ids[:8])) + (" ..." if len(ids) > 8 else "")
+
+
+def _clusters(ids: List[int], foreign_between, other_series) -> List[List[int]]:
+    """Group sorted item IDs into runs not interrupted by other definitions.
+    Neighbouring runs are joined when fewer definitions separate them than
+    the smaller run holds (a stray definition inside a series), unless one of
+    those belongs to another series."""
+    clusters = [[ids[0]]]
+    for i in ids[1:]:
+        if foreign_between(clusters[-1][-1], i):
+            clusters.append([i])
+        else:
+            clusters[-1].append(i)
+    merged = True
+    while merged and len(clusters) > 1:
+        merged = False
+        best = None
+        for n in range(len(clusters) - 1):
+            between = foreign_between(clusters[n][-1], clusters[n + 1][0])
+            if any(other_series(i) for i in between):
+                continue
+            if len(between) < min(len(clusters[n]), len(clusters[n + 1])) and (best is None or len(between) < best[1]):
+                best = (n, len(between))
+        if best is not None:
+            n = best[0]
+            clusters[n:n + 2] = [clusters[n] + clusters[n + 1]]
+            merged = True
+    return clusters
 
 
 def _find_rule(members: List[dict], wanted: set, categories: Optional[set] = None) -> Optional[str]:

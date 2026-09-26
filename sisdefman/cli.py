@@ -9,7 +9,7 @@ import os
 import sys
 from typing import List, Optional
 
-from . import __version__, adopt, check, derive, edits, importer, jsonfmt, ops, query, safety, steam, tableimport, ui
+from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, ops, query, safety, steam, tableimport, ui
 from .project import MODES, Project, ProjectError
 
 DEFAULT_PROJECT = "sisdefman.json"
@@ -349,7 +349,12 @@ def cmd_series(args) -> int:
 
     config = {"name": getattr(args, "name", None)}
     if action == "new":
-        config.update(first_id=args.first_id, last_id=args.last_id)
+        suggestion = edits.suggest_series(project)
+        first = args.first_id if args.first_id is not None else suggestion["first_id"]
+        last = args.last_id if args.last_id is not None else suggestion["last_id"]
+        if first is None or last is None:
+            raise ProjectError("give the series' ID range with --first-id and --last-id")
+        config.update(first_id=first, last_id=last)
     elif args.last_id is not None:
         config["last_id"] = args.last_id
     s = project.series.get(args.key, {"containers": {}, "generators": {}})
@@ -371,11 +376,48 @@ def cmd_series(args) -> int:
                 raise ProjectError(f"--generator expects ITEMDEFID=TAGS, got {spec!r}")
             generators[str(int(gid))] = rule.strip()
         config["generators"] = {k: v for k, v in generators.items() if int(k) not in (args.remove or [])}
+    if action == "new" and args.copy_from:
+        return _series_new_copy(args, project, config)
     for note in edits.save_series(project, args.key, config, is_new=(action == "new")):
         print(ui.yellow(note) if "{contents}" in note else note)
+    if getattr(args, "dry_run", False):
+        print(ui.yellow("Dry run: nothing saved."))
+        return 0
     project.save()
     print(ui.green(f"Saved series {args.key!r}."))
     return 0
+
+
+def _series_new_copy(args, project: Project, config: dict) -> int:
+    plan = edits.series_copy_plan(project, args.copy_from, args.key, args.name or "", config["first_id"])
+    if args.copy_ids:
+        ids, rest = query.split_targets(args.copy_ids.replace(",", " ").split())
+        if rest:
+            raise ProjectError(f"--copy-ids expects itemdefids, got {' '.join(rest)}")
+    else:
+        ids = [c["id"] for c in plan["candidates"] if c["copy"]]
+    new_ids = {c["id"]: c["new_id"] for c in plan["candidates"]}
+    for spec in args.new_id or []:
+        old, sep, new = spec.partition("=")
+        if not sep or not old.strip().isdigit() or not new.strip().isdigit():
+            raise ProjectError(f"--new-id expects OLD=NEW, got {spec!r}")
+        new_ids[int(old)] = int(new)
+    replacements = plan["replacements"] + [list(spec.split("=", 1)) for spec in args.replace or [] if "=" in spec]
+    print(_mode_tag(project))
+    protect = safety.protected_before(project, project.build())
+    report = edits.create_series(project, args.key, config, {"source": args.copy_from, "ids": ids,
+                                                             "new_ids": new_ids, "replacements": replacements})
+    print(f"Series {args.key!r}: IDs {config['first_id']}-{config['last_id']}, copied from {args.copy_from!r}:")
+    for c in report["created"]:
+        print(f"  {c['old']:>7} -> {c['new']:<7} {c['name']}")
+    skipped = [c for c in plan["candidates"] if c["id"] not in ids]
+    for c in skipped:
+        print(ui.dim(f"  {c['id']:>7}    not copied  {c['name']}" + (f" ({c['note']})" if c["note"] else "")))
+    if replacements:
+        print("Text replaced: " + ", ".join(f"{a!r} -> {b!r}" for a, b in replacements))
+    for note in report["notes"]:
+        print(ui.yellow(note))
+    return _guarded_save(args, project, protect, "Creating this series")
 
 
 def cmd_template(args) -> int:
@@ -701,6 +743,40 @@ def gui_project(args) -> Optional[str]:
     return DEFAULT_PROJECT if os.path.exists(DEFAULT_PROJECT) else None
 
 
+def cmd_colors(args) -> int:
+    project = _load(args)
+    action = args.colors_action or "list"
+    if action == "list":
+        used = colors.usages(project)
+        if not project.colors:
+            print("The palette is empty. `sisdefman colors convert` puts the project's colours in it.")
+        width = max([len(k) for k in project.colors] + [4]) + 1
+        for kw, value in project.colors.items():
+            n = len(used.get(kw, []))
+            print(f"{ui.swatch(value)}@{kw:<{width}} {value}  {n} use(s)")
+        for kw in sorted(k for k in used if k not in project.colors):
+            print(ui.red(f"@{kw} is used ({len(used[kw])}x, e.g. {used[kw][0]}) but not in the palette"))
+        literal = sum(1 for _ in colors._convertible(project))
+        if literal:
+            print(ui.dim(f"{literal} colour value(s) are still hex; `sisdefman colors convert` moves them "
+                         "into the palette."))
+        return 0
+    protect = safety.protected_before(project, project.build())
+    if action == "set":
+        colors.set_color(project, args.keyword.lstrip("@"), args.hex)
+        print(f"@{args.keyword.lstrip('@')} = {project.colors[args.keyword.lstrip('@')]}")
+    elif action == "rename":
+        n = colors.rename(project, args.old.lstrip("@"), args.new.lstrip("@"))
+        print(f"Renamed @{args.old.lstrip('@')} to @{args.new.lstrip('@')}; updated {n} reference(s).")
+    elif action == "delete":
+        colors.delete(project, args.keyword.lstrip("@"), force=args.force)
+        print(f"Deleted @{args.keyword.lstrip('@')}.")
+    elif action == "convert":
+        for line in colors.convert(project).lines():
+            print(line)
+    return _guarded_save(args, project, protect, "This colour change")
+
+
 def cmd_gui(args) -> int:
     from . import gui
     return gui.serve(gui_project(args), host=args.host, port=args.port, open_browser=not args.no_browser)
@@ -799,8 +875,19 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("key", help="series key, as used in the series: tag")
         sp.add_argument("--name", help="display name used in descriptions")
         if name == "new":
-            sp.add_argument("--first-id", type=int, required=True)
-            sp.add_argument("--last-id", type=int, required=True, help="last itemdefid the series may use")
+            sp.add_argument("--first-id", type=int, help="first itemdefid (default: the block after the last series)")
+            sp.add_argument("--last-id", type=int, help="last itemdefid the series may use")
+            sp.add_argument("--copy-from", metavar="SERIES",
+                            help="copy that series' crate, generators and other supporting definitions")
+            sp.add_argument("--copy-ids", metavar="IDS", help="with --copy-from: which definitions (default: all "
+                                                              "in its ID block that aren't shared)")
+            sp.add_argument("--new-id", action="append", metavar="OLD=NEW",
+                            help="with --copy-from: a different new ID for one definition (e.g. the crate)")
+            sp.add_argument("--replace", action="append", metavar="FIND=REPLACE",
+                            help="with --copy-from: also replace this text in the copies")
+            sp.add_argument("-n", "--dry-run", action="store_true", help="show what would happen; save nothing")
+            sp.add_argument(ui.ACCEPT_FLAG, dest="accept_inventory_changes", action="store_true",
+                            help=argparse.SUPPRESS)
         else:
             sp.add_argument("--last-id", type=int, help="last itemdefid the series may use")
         sp.add_argument("--template", help="description template for this series (\"\" = use the global one)")
@@ -925,6 +1012,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("new")
     guarded(sp)
     sp.set_defaults(func=cmd_table)
+
+    p = command("colors", "Show or edit the colour palette (colour fields can say @keyword).")
+    p.set_defaults(func=cmd_colors, colors_action=None)
+    csub = p.add_subparsers(dest="colors_action", metavar="ACTION")
+    csub.add_parser("list", help="list the palette", parents=[common]).set_defaults(func=cmd_colors)
+    sp = csub.add_parser("set", help="add or change a colour: colors set rare eb7ce9", parents=[common])
+    sp.add_argument("keyword")
+    sp.add_argument("hex")
+    guarded(sp)
+    sp.set_defaults(func=cmd_colors)
+    sp = csub.add_parser("rename", help="rename a colour and every reference to it", parents=[common])
+    sp.add_argument("old")
+    sp.add_argument("new")
+    guarded(sp)
+    sp.set_defaults(func=cmd_colors)
+    sp = csub.add_parser("delete", help="delete a colour", parents=[common])
+    sp.add_argument("keyword")
+    sp.add_argument("--force", action="store_true", help="even if it is used")
+    guarded(sp)
+    sp.set_defaults(func=cmd_colors)
+    sp = csub.add_parser("convert", parents=[common],
+                         help="move the project's hex colours into the palette (the export does not change)")
+    guarded(sp)
+    sp.set_defaults(func=cmd_colors)
 
     p = command("gui", "Open the graphical editor in your browser. Without a project in this folder "
                        "(or with --choose) it starts with a project chooser.")

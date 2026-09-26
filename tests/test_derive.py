@@ -205,3 +205,17 @@ class SeriesCountTests(unittest.TestCase):
         self.assertTrue(text.startswith("One of 6 items from the Test Series, or one of 2 secret ones.\n\nPistol | Red"))
         ops.insert_items(self.project, "crate1", [{"name": "New", "tags": "rarity:epic"}])
         self.assertTrue(self.built()[1]["description"].startswith("One of 6 items from the Test Series, or one of 3"))
+
+
+class ContentsKeywordTests(unittest.TestCase):
+    def test_contents_with_and_without_secret_rares(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project, _ = importer.import_files(fixtures.write_files(tmp))
+        crate = project.item(1)
+        crate["description"] = "Regular:\n{contents_no_secret}\n\nSecret:\n{contents_secret}"
+        project.series["crate1"]["containers"]["1"] = {"exclude": []}  # secret rares now come from "secret"
+        project.series["crate1"]["secret"] = "rarity:epic"
+        text = {it["itemdefid"]: it for it in project.build()}[1]["description"]
+        regular, secret = text.split("\n\n")
+        self.assertEqual(regular.split("\n")[1:], [n for n, r, _ in fixtures.ITEMS if r != "epic"])
+        self.assertEqual(secret.split("\n")[1:], ["Pistol | Flames", "Rifle | Sparks"])

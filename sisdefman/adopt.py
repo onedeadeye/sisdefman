@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import derive
+from . import colors, derive
 from .derive import Context, Schema, Unknown
 from .project import Project, ProjectError
 
@@ -145,6 +145,14 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
     positions = project.series_positions()
     before = {it["itemdefid"]: it for it in project.build()}
 
+    def same(a, b, name: str) -> bool:
+        if colors.is_color_field(name):  # "@common" and "d2d2d2" can be the same colour
+            ra, rb = {name: a}, {name: b}
+            project.resolve_colors(ra)
+            project.resolve_colors(rb)
+            return str(ra[name]).lower() == str(rb[name]).lower()
+        return a == b
+
     active = []
     for i in ids:
         rec = records.get(i)
@@ -231,7 +239,7 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
         new.update((f, values[i][f]) for f in fields if values[i].get(f) not in (None, ""))
         trial, _ = derive.resolve(schema, new, positions.get(i))
         for name in rules:
-            if name in rec and name not in fields and rec[name] != trial.get(name):
+            if name in rec and name not in fields and not same(rec[name], trial.get(name), name):
                 new[name] = copy.deepcopy(rec[name])
                 result.overrides.setdefault(i, []).append(name)
         for key, value in rec.items():

@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from . import __version__, adopt, check, derive, edits, importer, jsonfmt, launcher, ops, safety, steam, tableimport, ui
+from . import __version__, adopt, check, colors, derive, edits, importer, jsonfmt, launcher, ops, safety, steam, tableimport, ui
 from .project import DEFAULT_DUMMY_ITEM, MODES, Project, ProjectError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -151,6 +151,10 @@ class App:
             "settings": project.settings,
             "tables": project.tables,
             "kinds": project.kinds,
+            "colors": project.colors,
+            "color_usage": {kw: len(u) for kw, u in colors.usages(project).items()},
+            "hex_colors_left": sum(1 for _ in colors._convertible(project)),
+            "new_series": edits.suggest_series(project),
             "series": series,
             "items": items,
             "issues": [{"level": x.level, "text": x.text, "itemdefid": x.itemdefid}
@@ -210,6 +214,7 @@ class App:
                 item["description"] = project.render_description(info.key, item, info, record)
             except ProjectError as e:
                 problems.append(str(e))
+        problems.extend(project.resolve_colors(item))
         return {"item": item, "problems": problems, "rules": {f: by_rule.get(f) for f in rules},
                 "overrides": derive.overridden(schema, record)}
 
@@ -246,6 +251,12 @@ class App:
                                confirm)
         if route == "table/save":
             return self.mutate("This table change", lambda p: _save_table(p, body), confirm)
+        if route == "colors/save":
+            return self.mutate("This colour change", lambda p: _save_colors(p, body), confirm)
+        if route == "colors/convert":
+            if body.get("dry_run"):
+                return colors.convert(self.load()).as_dict()
+            return self.mutate("Converting colours", lambda p: colors.convert(p).as_dict(), confirm)
         if route == "table/csv-preview":
             data = tableimport.read_csv(str(body.get("csv") or ""))
             clean = (lambda v: v.strip()) if body.get("raw") else tableimport.clean_value
@@ -273,6 +284,17 @@ class App:
         if route == "series/save":
             return self.mutate("This series change", lambda p: {"notes": edits.save_series(
                 p, body["key"], body.get("config", {}), bool(body.get("is_new")))}, confirm)
+        if route == "series/plan":
+            project = self.load()
+            return edits.series_copy_plan(project, str(body.get("source") or ""), str(body.get("key") or ""),
+                                          str(body.get("name") or ""), int(body.get("first_id") or 0))
+        if route == "series/create":
+            def create(p: Project):
+                return edits.create_series(p, str(body.get("key") or ""), body.get("config") or {},
+                                           body.get("copy") or None)
+            if body.get("dry_run"):
+                return create(self.load())
+            return self.mutate("Creating this series", create, confirm)
         if route == "series/delete":
             return self.mutate("Deleting this series", lambda p: edits.delete_series(p, body["key"]), confirm)
         if route == "settings/save":
@@ -506,6 +528,23 @@ def _save_table(project: Project, body: dict):
         raise ProjectError("row keys cannot be empty")
     edits.replace_table(project, name, table, body.get("renames"))
     return {"name": name}
+
+
+def _save_colors(project: Project, body: dict):
+    """Replace the palette (the GUI's colour editor). ``renames`` maps old
+    keywords to new ones so references follow."""
+    palette = body.get("colors")
+    if not isinstance(palette, dict):
+        raise ProjectError("colors must be an object mapping keywords to hex colours")
+    for old, new in (body.get("renames") or {}).items():
+        if old in project.colors and old != new:
+            colors.rename(project, old, new)
+    for kw in list(project.colors):
+        if kw not in palette:
+            colors.delete(project, kw)
+    for kw, value in palette.items():
+        colors.set_color(project, kw, str(value))
+    project.data["colors"] = {kw: project.colors[kw] for kw in palette}
 
 
 def _delete_kind(project: Project, body: dict):

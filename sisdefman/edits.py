@@ -4,10 +4,11 @@ and the schema (tables + kinds)."""
 from __future__ import annotations
 
 import copy
+import re
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from . import derive, steam
-from .project import CONTENTS_TOKEN, Project, ProjectError
+from .project import CONTENTS_TOKEN, LISTING_TOKENS, Project, ProjectError
 
 RESERVED_FIELDS = ("itemdefid", "kind")
 
@@ -324,7 +325,7 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
         if taken:
             raise ProjectError(f"itemdefid {', '.join(sorted(taken))} already belongs to series {other!r}")
     for cid in s["containers"]:
-        if CONTENTS_TOKEN not in (by_id[int(cid)].get("description") or ""):
+        if not any(t in (by_id[int(cid)].get("description") or "") for t in LISTING_TOKENS):
             notes.append(f"Put {CONTENTS_TOKEN} in the description of {cid} where the item list should go.")
     project.series[key] = s
     return notes
@@ -335,3 +336,180 @@ def delete_series(project: Project, key: str) -> None:
     if project.members(key) or s.get("allocated_through"):
         raise ProjectError(f"series {key!r} has items or used IDs; only an unused series can be deleted")
     del project.series[key]
+
+
+# ------------------------------------------------------- new series (copy)
+
+_NO_TEXT_REPLACE = ("itemdefid", "kind", "bundle", "exchange", "tag_generators", "tags")
+
+
+def suggest_series(project: Project) -> dict:
+    """Defaults for a new series, following the last one: the next key
+    (crate2 -> crate3) and the next ID block of the same size."""
+    if not project.series:
+        return {"key": "series1", "first_id": None, "last_id": None, "source": None}
+    by_start = sorted(project.series, key=lambda k: project.series[k]["first_id"])
+    source = by_start[-1]
+    s = project.series[source]
+    m = re.match(r"^(.*?)(\d+)$", source)
+    prefix, number = (m.group(1), int(m.group(2))) if m else (source, 1)
+    key = f"{prefix}{number + 1}"
+    while key in project.series:
+        number += 1
+        key = f"{prefix}{number + 1}"
+    if len(by_start) > 1:
+        step = s["first_id"] - project.series[by_start[-2]]["first_id"]
+    else:
+        step = 10 ** len(str(s["last_id"] - s["first_id"] + 1))
+    first, last = s["first_id"] + step, s["last_id"] + step
+    used = project.by_id()
+    while any(first <= i <= last for i in used) or any(
+            o["first_id"] <= last and first <= o["last_id"] for o in project.series.values()):
+        first, last = first + step, last + step
+    return {"key": key, "first_id": first, "last_id": last, "source": source}
+
+
+def _block(s: dict) -> Tuple[int, int]:
+    """The ID block around a series: 210-296 -> 200-299 (supporting
+    definitions such as generators usually live next to the items)."""
+    size = 10 ** len(str(s["last_id"] - s["first_id"] + 1))
+    return (s["first_id"] // size) * size, -(-(s["last_id"] + 1) // size) * size - 1
+
+
+def series_copy_plan(project: Project, source: str, key: str, name: str, first_id: int) -> dict:
+    """What copying the setup of ``source`` for a new series would copy: the
+    source's containers and generators and the other definitions in its ID
+    block, each with its new ID, plus suggested text replacements."""
+    s = project.get_series(source)
+    offset = first_id - s["first_id"]
+    lo, hi = _block(s)
+    records = project.by_id()
+    others = {int(k) for o_key, o in project.series.items() if o_key != source
+              for k in list(o["containers"]) + list(o["generators"])}
+    containers = [int(k) for k in s["containers"]]
+    ids = sorted({i for i in records if lo <= i <= hi and project.series_for_id(i) is None} |
+                 set(containers) | {int(k) for k in s["generators"]})
+    ids = [i for i in ids if i not in others]
+    referenced_elsewhere = set()
+    for rec in project.items:
+        if lo <= rec["itemdefid"] <= hi or rec["itemdefid"] in containers:
+            continue
+        try:
+            referenced_elsewhere.update(r for _, r in steam.references(rec))
+        except steam.SyntaxProblem:
+            pass
+    taken = set(records)
+    candidates = []
+    for i in ids:
+        if i in containers:
+            new = i + 1
+            while new in taken or project.series_for_id(new) is not None:
+                new += 1
+            taken.add(new)
+        else:
+            new = i + offset
+        shared = i in referenced_elsewhere and i not in containers
+        rec = records[i]
+        candidates.append({
+            "id": i, "new_id": new, "name": rec.get("name", ""), "type": rec.get("type", ""),
+            "role": "container" if i in containers else ("generator" if str(i) in s["generators"] else ""),
+            "copy": not shared,
+            "note": "also used outside this series (shared); not copied unless ticked" if shared else "",
+        })
+    return {"candidates": candidates, "replacements": _suggest_replacements(project, source, key,
+                                                                            s.get("name") or source, name, ids)}
+
+
+def _suggest_replacements(project: Project, source: str, key: str, old_name: str, new_name: str,
+                          ids: List[int]) -> List[List[str]]:
+    records = project.by_id()
+    texts = [v for i in ids for k, v in records[i].items() if isinstance(v, str) and k not in _NO_TEXT_REPLACE]
+    pairs = []
+    m_old, m_new = re.match(r"^(.*?)(\d+)$", source), re.match(r"^(.*?)(\d+)$", key)
+    if m_old and m_new and m_old.group(1) == m_new.group(1):
+        p, a, b = m_old.group(1), m_old.group(2), m_new.group(2)
+        for fmt in ("{p}{n}", "{p}_{n}", "{p} {n}", "{P} {n}", "{P}{n}", "{U}{n}", "{U}_{n}"):
+            old = fmt.format(p=p, P=p[:1].upper() + p[1:], U=p.upper(), n=a)
+            new = fmt.format(p=p, P=p[:1].upper() + p[1:], U=p.upper(), n=b)
+            if [old, new] not in pairs and any(old in t for t in texts):
+                pairs.append([old, new])
+    elif any(source in t for t in texts):
+        pairs.append([source, key])
+    if new_name and old_name and new_name != old_name:
+        pairs.append([old_name, new_name])
+        old_words, new_words = old_name.split(), new_name.split()
+        common = 0
+        while common < min(len(old_words), len(new_words)) - 1 and old_words[-1 - common] == new_words[-1 - common]:
+            common += 1
+        if common:
+            old_head, new_head = " ".join(old_words[:-common]), " ".join(new_words[:-common])
+            if old_head and old_head != new_head and any(old_head in t for t in texts):
+                pairs.append([old_head, new_head])
+    return pairs
+
+
+def create_series(project: Project, key: str, config: dict, copy_setup: Optional[dict] = None) -> dict:
+    """Create a series, optionally copying definitions from another one.
+
+    ``copy_setup``: ``{"source": key, "ids": [...], "new_ids": {old: new},
+    "replacements": [[find, replace], ...]}``. Copied definitions get their
+    new IDs; references between them follow, ``series:<source>`` becomes
+    ``series:<key>`` in tags and exchange recipes, and the replacements are
+    applied to their other text. The copies of the source's containers and
+    generators become the new series' containers and generators.
+    """
+    created = []
+    config = dict(config)
+    if copy_setup:
+        source = copy_setup.get("source")
+        s = project.get_series(source)
+        first = config.get("first_id")
+        if not isinstance(first, int) or isinstance(first, bool):
+            raise ProjectError("first_id must be a whole number")
+        offset = first - s["first_id"]
+        overrides = {int(k): int(v) for k, v in (copy_setup.get("new_ids") or {}).items()}
+        ids = [int(i) for i in copy_setup.get("ids") or []]
+        mapping = {i: overrides.get(i, i + offset) for i in ids}
+        records = project.by_id()
+        new_range = (first, config.get("last_id", first))
+        if len(set(mapping.values())) != len(mapping):
+            raise ProjectError("two copied definitions would get the same new ID")
+        for old, new in mapping.items():
+            if old not in records:
+                raise ProjectError(f"there is no definition {old} to copy")
+            if project.series_for_id(old) is not None:
+                raise ProjectError(f"{old} is an item of a series; only supporting definitions can be copied")
+            if new <= 0 or new in records:
+                raise ProjectError(f"{old} would be copied to {new}, which is already used")
+            if project.series_for_id(new) is not None or new_range[0] <= new <= new_range[1]:
+                raise ProjectError(f"{old} would be copied to {new}, which is inside a series' ID range")
+        replacements = sorted(([str(a), str(b)] for a, b in copy_setup.get("replacements") or [] if a),
+                              key=lambda r: -len(r[0]))
+        tag = re.compile(r"(^|;)series:" + re.escape(source) + r"(?=;|$)")
+        material = re.compile(r"(^|[;,])series:" + re.escape(source) + r"(?=\*)")
+        for old in ids:
+            rec = copy.deepcopy(records[old])
+            rec["itemdefid"] = mapping[old]
+            steam.remap_references(rec, mapping)
+            if isinstance(rec.get("tags"), str):
+                rec["tags"] = tag.sub(lambda m: f"{m.group(1)}series:{key}", rec["tags"])
+            if isinstance(rec.get("exchange"), str):
+                rec["exchange"] = material.sub(lambda m: f"{m.group(1)}series:{key}", rec["exchange"])
+            for field, value in list(rec.items()):
+                if isinstance(value, str) and field not in _NO_TEXT_REPLACE:
+                    for find, replace in replacements:
+                        value = value.replace(find, replace)
+                    rec[field] = value
+            project.items.append(rec)
+            created.append({"old": old, "new": mapping[old], "name": rec.get("name", "")})
+        config.setdefault("containers", {str(mapping[int(c)]): copy.deepcopy(cfg)
+                                         for c, cfg in s["containers"].items() if int(c) in mapping})
+        config.setdefault("generators", {str(mapping[int(g)]): rule
+                                         for g, rule in s["generators"].items() if int(g) in mapping})
+        if "description_template" in s:
+            config.setdefault("description_template", s["description_template"])
+        if "secret" in s:
+            config.setdefault("secret", copy.deepcopy(s["secret"]))
+    notes = save_series(project, key, config, is_new=True)
+    project.items.sort(key=lambda it: it["itemdefid"])
+    return {"key": key, "created": created, "notes": notes}
