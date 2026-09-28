@@ -4,6 +4,7 @@ and the schema (tables + kinds)."""
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -139,6 +140,67 @@ def _tag_users(project: Project, table: str, old: str, new: str) -> List[int]:
             value = direct_row(project, rec, table)
             if value is not None and value.lower() == old.lower() and value.lower() != new.lower():
                 out.append(rec["itemdefid"])
+    return out
+
+
+def pick_rows(project: Project, table: str, only: Iterable[str] = (), skip: Iterable[str] = ()) -> List[str]:
+    """Keys of ``table``'s rows in table order: all of them, or ``only`` these,
+    less ``skip`` (keys match ignoring case)."""
+    rows = _table(project, table)["rows"]
+
+    def keys(names) -> set:
+        out = set()
+        for name in names:
+            key = derive.row_key(rows, name)
+            if key is None:
+                raise ProjectError(f"table {table!r} has no row {name!r}")
+            out.add(key)
+        return out
+
+    wanted, unwanted = keys(only), keys(skip)
+    return [k for k in rows if (not wanted or k in wanted) and k not in unwanted]
+
+
+def items_for_rows(project: Project, record: dict, table: str, keys: Iterable[str]) -> List[dict]:
+    """One copy of ``record`` per row of ``table``. Each copy holds the row's
+    key in the kind's field(s) for the table (a plain item gets a ``table:``
+    tag), and ``{table}`` and ``{table.column}`` in its text are replaced by
+    the row's key and values."""
+    rows = _table(project, table)["rows"]
+    columns = _table(project, table)["columns"]
+    kind = project.kinds.get(record.get("kind")) if record.get("kind") else None
+    if record.get("kind") and kind is None:
+        raise ProjectError(f"no kind named {record['kind']!r}")
+    ref_fields = [f for f, spec in derive.fields_of(kind).items()
+                  if isinstance(spec, dict) and spec.get("type") == "ref" and spec.get("table") == table]
+    if kind is not None and not ref_fields:
+        raise ProjectError(f"kind {record['kind']!r} has no field that holds a row of table {table!r}")
+    pattern = re.compile(r"\{" + re.escape(table) + r"(?:\.([^{}.:!\[\]]+))?\}")
+    for column in {m.group(1) for m in pattern.finditer(json.dumps(record, ensure_ascii=False)) if m.group(1)}:
+        if column not in columns:
+            raise ProjectError(f"table {table!r} has no column {column!r}")
+    out = []
+    for key in keys:
+        if key not in rows:
+            raise ProjectError(f"table {table!r} has no row {key!r}")
+        row = rows[key]
+
+        def fill(value):
+            if isinstance(value, str):
+                return pattern.sub(lambda m: str(key if m.group(1) is None else row.get(m.group(1), "")), value)
+            if isinstance(value, list):
+                return [fill(v) for v in value]
+            return value
+
+        new = {k: fill(v) for k, v in copy.deepcopy(record).items() if k != "itemdefid"}
+        for f in ref_fields:
+            new[f] = key
+        if kind is None:
+            steam.set_single_tag(new, table, key)
+        else:  # kind, then the kind's fields in order, then the rest
+            order = ["kind", *derive.fields_of(kind)]
+            new = {**{k: new[k] for k in order if k in new}, **{k: v for k, v in new.items() if k not in order}}
+        out.append(new)
     return out
 
 

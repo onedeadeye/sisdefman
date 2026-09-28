@@ -252,6 +252,16 @@ def _new_items(args, project: Project) -> List[dict]:
                 it.pop(field, None)
             else:
                 it[field] = value
+    split = lambda text: [k.strip() for part in text or [] for k in part.split(",") if k.strip()]  # noqa: E731
+    if getattr(args, "each", None):
+        if len(items) != 1:
+            raise ProjectError("--each makes copies of one item; give a single item")
+        keys = edits.pick_rows(project, args.each, split(args.only), split(args.skip))
+        if not keys:
+            raise ProjectError(f"no rows of table {args.each!r} left to make items for")
+        items = edits.items_for_rows(project, items[0], args.each, keys)
+    elif args.only or args.skip:
+        raise ProjectError("--only and --skip choose rows for --each")
     return items
 
 
@@ -852,6 +862,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("assignments", nargs="*", metavar="FIELD=VALUE",
                    help="fields of the new item; FIELD:=JSON for true, numbers, etc.")
     p.add_argument("--kind", help="make it an item of this kind (its other fields are derived)")
+    p.add_argument("--each", metavar="TABLE",
+                   help="add one item per row of this table: the kind's field for the table holds the row, and "
+                        "{TABLE} and {TABLE.column} in the values are filled in from it")
+    p.add_argument("--only", action="append", metavar="KEYS", help="with --each: only these rows (comma-separated)")
+    p.add_argument("--skip", action="append", metavar="KEYS", help="with --each: leave out these rows (comma-separated)")
     p.add_argument("--set", action="append", metavar="FIELD=VALUE", help=argparse.SUPPRESS)
     p.add_argument("--set-json", action="append", metavar="FIELD=JSON", help=argparse.SUPPRESS)
     guarded(p)

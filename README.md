@@ -599,7 +599,8 @@ left for you to edit.
 In the GUI, **+ New series** fills in the next key and ID block, and starts from a copy of
 the last series. The **Start from** card lists every definition it will copy, with its new
 ID. Untick definitions, change their new IDs or edit the text replacements there, or choose
-**An empty series** to set up containers and generators yourself.
+**An empty series** to set up containers and generators yourself, or for a series without a
+crate (items granted some other way).
 
 ### Adding, inserting, moving and removing items
 
@@ -607,6 +608,8 @@ ID. Untick definitions, change their new IDs or edit the text replacements there
 sisdefman add crate1 --kind skin weapon=rifle finish=Gold mat_id=gold rarity=common   # append: safe
 sisdefman add crate1 --like 121 finish=Rust mat_id=rust                               # copy, then change
 sisdefman add crate1 --after 116 --from new_item.json                                 # insert: renumbers
+sisdefman add stock --kind skin --each weapon --skip knife finish=Stock rarity=common \
+    "mat_id={weapon.ammo}Default"                                                     # one per weapon
 sisdefman move 124 --before 122
 sisdefman remove 118              # later items move down to close the gap
 sisdefman remove 118 --no-shift   # leave a gap (exported as a dummy)
@@ -615,6 +618,13 @@ sisdefman remove 118 --no-shift   # leave a gap (exported as a dummy)
 - **Item fields.** Items are given as `FIELD=VALUE` / `FIELD:=JSON`, with `--kind`, as a
   copy of another item (`--like ID`), or from a JSON file with one item or a list
   (`--from FILE`).
+- **One item per table row.** `--each TABLE` adds a copy of the item for every row of the
+  table, in the table's order (`--only KEYS` / `--skip KEYS` choose rows, comma-separated).
+  The kind's field for that table holds each row's key; a plain item gets a `TABLE:` tag
+  instead. `{weapon}` and `{weapon.column}` in the other values are replaced by the row's key
+  and values when the items are made, so the example above stores `mat_id: ShellDefault` for
+  a weapon whose `ammo` is `Shell`. In the GUI, tick **Add one item per row of a table**
+  when adding an item to a series, and untick the rows you don't want.
 - **IDs and tags.** The itemdefid comes from the item's position. A plain item gets the
   `series:` tag set for you; a kind's tags rule normally includes `series:{series}`.
 - **Renumbering.** Only the consecutive run of items after the change is renumbered. An

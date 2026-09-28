@@ -768,7 +768,8 @@ const requestPreview = debounce(async () => {
   const d = ui.draft;
   if (!d) return;
   try {
-    const { result } = await request("preview", { record: draftRecordForServer(), series: d.series, position: d.position });
+    const each = d.mode === "create" && d.each ? { table: d.each.table, keys: d.each.keys.slice(0, 1) } : undefined;
+    const { result } = await request("preview", { record: draftRecordForServer(), series: d.series, position: d.position, each });
     if (ui.draft !== d) return;
     d.preview = result;
     updatePreviewDom();
@@ -830,6 +831,7 @@ function renderEditorPanel() {
     const sel = h("select", {
       onchange: () => {
         d.record = sel.value ? { kind: sel.value } : { type: "item", name: "", description: "" };
+        d.each = null;
         render(); requestPreview();
       },
     }, h("option", { value: "" }, "(none: edit the Steam fields directly)"),
@@ -837,8 +839,9 @@ function renderEditorPanel() {
     sel.value = rec.kind || "";
     body.push(h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Kind")), sel));
   }
+  if (d.mode === "create" && d.series && kind) body.push(renderEachRow(d, kind));
   if (kind) {
-    body.push(renderKindFields(rec, kind), renderDerived(rec, kind));
+    body.push(renderKindFields(rec, kind, d.mode === "create" && d.each ? d.each.table : null), renderDerived(rec, kind));
     const exclude = new Set(["itemdefid", "kind", ...Object.keys(kind.fields || {}), ...Object.keys(kind.derive || {})]);
     body.push(h("div", { class: "section" }, h("h5", {}, "Other fields",
       h("span", { class: "hint", style: "text-transform:none;letter-spacing:0" }, "exported as they are")),
@@ -849,8 +852,7 @@ function renderEditorPanel() {
   }
   body.push(h("div", { class: "section" }, h("h5", {}, "Exported definition"), refs.json), paletteList());
 
-  refs.saveBtn = h("button", { class: "btn primary", disabled: !d.dirty, onclick: saveDraft },
-    d.mode === "create" ? "Add item" : "Save");
+  refs.saveBtn = h("button", { class: "btn primary", disabled: !d.dirty, onclick: saveDraft }, saveLabel(d));
   const actions = [refs.saveBtn];
   if (d.mode === "edit") {
     actions.push(h("button", { class: "btn", onclick: () => { openDraft(d.id); render(); requestPreview(); } }, "Revert"));
@@ -933,8 +935,61 @@ function refLabel(table, key) {
   return row && first && row[first] ? `${key} — ${row[first]}` : key;
 }
 
-function renderKindFields(rec, kind) {
+function saveLabel(d) {
+  if (d.mode !== "create") return "Save";
+  return d.each ? `Add ${plural(d.each.keys.length, "item")}` : "Add item";
+}
+
+/* Adding to a series: one new item per ticked row of a table the kind refers
+   to, e.g. a stock skin for every weapon. {weapon} and {weapon.column} in the
+   other fields are filled in from each row. */
+function renderEachRow(d, kind) {
+  const tables = [...new Set(Object.values(kind.fields || {})
+    .filter((spec) => spec.type === "ref" && S.tables[spec.table]).map((spec) => spec.table))];
+  if (!tables.length) return null;
+  if (d.each && !tables.includes(d.each.table)) d.each = null;
+  const start = (table) => ({ table, keys: Object.keys(S.tables[table].rows || {}) });
+  const toggle = h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!d.each, onchange: (ev) => {
+    d.each = ev.target.checked ? start(tables[0]) : null;
+    render(); requestPreview();
+  } }), "Add one item per row of a table");
+  if (!d.each) return h("div", { class: "section" }, toggle);
+  const table = d.each.table;
+  const keys = Object.keys(S.tables[table].rows || {});
+  const chosen = new Set(d.each.keys);
+  const count = h("span", { class: "hint", style: "white-space:nowrap" });
+  const update = () => {
+    d.each.keys = keys.filter((k) => chosen.has(k));
+    count.textContent = `${d.each.keys.length} of ${keys.length} rows`;
+    if (refs.saveBtn) refs.saveBtn.textContent = saveLabel(d);
+    requestPreview();
+  };
+  const boxes = keys.map((k) => h("input", { type: "checkbox", checked: chosen.has(k), onchange: (ev) => {
+    if (ev.target.checked) chosen.add(k); else chosen.delete(k);
+    update();
+  } }));
+  const setAll = (on) => { for (const [n, k] of keys.entries()) { boxes[n].checked = on; if (on) chosen.add(k); else chosen.delete(k); } update(); };
+  const tableSel = tables.length > 1 ? (() => {
+    const sel = h("select", { onchange: () => { d.each = start(sel.value); render(); requestPreview(); } },
+      tables.map((t) => h("option", { value: t }, t)));
+    sel.value = table; return sel;
+  })() : h("b", {}, table);
+  count.textContent = `${d.each.keys.length} of ${keys.length} rows`;
+  return h("div", { class: "section" }, toggle,
+    h("div", { class: "row", style: "margin:6px 0" }, h("span", {}, "Table"), tableSel, h("span", { style: "flex:1" }), count,
+      h("button", { class: "btn small", onclick: () => setAll(true) }, "All"),
+      h("button", { class: "btn small", onclick: () => setAll(false) }, "None")),
+    h("div", { class: "row-picks" }, keys.map((k, n) => h("label", { class: "check" }, boxes[n], refLabel(table, k)))),
+    h("div", { class: "hint" }, `In the fields below, {${table}} and {${table}.column} are filled in from each row `
+      + `(e.g. {${table}.${(S.tables[table].columns || ["name"])[0]}}). The preview shows the first ticked row.`));
+}
+
+function renderKindFields(rec, kind, eachTable) {
   const rows = Object.entries(kind.fields || {}).map(([name, spec]) => {
+    if (eachTable && spec.type === "ref" && spec.table === eachTable) {
+      return h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, name), h("span", {}, `from table ${spec.table}`)),
+        h("div", { class: "hint" }, "Each new item gets one of the rows ticked above."));
+    }
     const set = (v) => {
       if (v === "" || v === null || v === undefined || (typeof v === "number" && Number.isNaN(v))) delete rec[name];
       else rec[name] = v;
@@ -1108,8 +1163,9 @@ async function saveDraft() {
     if (r) { openDraft(d.id); render(); requestPreview(); }
     return;
   }
-  const body = { record, series: d.series, position: d.position, itemdefid: d.itemdefid };
-  const r = await mutate("item/create", body, (res) => `Added item ${res.id}.`);
+  const body = { record, series: d.series, position: d.position, itemdefid: d.itemdefid, each: d.each || undefined };
+  const r = await mutate("item/create", body, (res) => res.ids && res.ids.length > 1
+    ? `Added ${res.ids.length} items (${res.ids[0]}–${res.ids[res.ids.length - 1]}).` : `Added item ${res.id}.`);
   if (r) {
     ui.draft = null;
     openDraft(r.id);

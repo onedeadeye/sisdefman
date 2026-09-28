@@ -194,6 +194,13 @@ class App:
         if isinstance(draft, dict) and draft.get("field_renames"):
             project.kinds[name] = copy.deepcopy(project.kinds[name])
             edits.rename_kind_fields(project.kinds[name], [record], draft["field_renames"])
+        each = body.get("each")
+        if isinstance(each, dict):  # one item per row: preview the first
+            keys = each.get("keys") or []
+            if not keys:
+                raise ProjectError("tick at least one row")
+            record = dict(edits.items_for_rows(project, record, str(each.get("table")), keys[:1])[0],
+                          itemdefid=record.get("itemdefid", 0))
         record.setdefault("itemdefid", 0)
         if not isinstance(record["itemdefid"], int):
             raise ProjectError("itemdefid must be a number")
@@ -494,11 +501,19 @@ def _save_item(project: Project, record: dict):
 def _create_item(project: Project, body: dict):
     record = _check_record(project, dict(body.get("record") or {}))
     key = body.get("series")
+    each = body.get("each")
+    if isinstance(each, dict) and not key:
+        raise ProjectError("one item per row can only be added to a series")
     if key:
+        records = [record]
+        if isinstance(each, dict):
+            if not each.get("keys"):
+                raise ProjectError("tick at least one row")
+            records = edits.items_for_rows(project, record, str(each.get("table")), each["keys"])
         position = body.get("position")
         skip = project.retired_ids() if project.mode == "release" else frozenset()
-        result = ops.insert_items(project, key, [record], position=position, skip_ids=skip)
-        return {"id": result.added[0], "moved": {str(k): v for k, v in result.moved.items()}}
+        result = ops.insert_items(project, key, records, position=position, skip_ids=skip)
+        return {"id": result.added[0], "ids": result.added, "moved": {str(k): v for k, v in result.moved.items()}}
     i = body.get("itemdefid")
     if not isinstance(i, int) or isinstance(i, bool) or i <= 0:
         raise ProjectError("give the new definition a positive itemdefid")

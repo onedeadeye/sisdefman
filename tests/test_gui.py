@@ -279,6 +279,25 @@ class GuiServerTests(unittest.TestCase):
         built = {i["itemdefid"]: i for i in self.project().build()}
         self.assertEqual(built[111]["description"], "Applies the Blue appearance to the Rifle.")
 
+    def test_adding_one_item_per_table_row(self):
+        self.post("items/adopt", {"kind": "skin", "ids": list(range(110, 118))})
+        self.assertEqual(self.post("series/create", {"key": "stock", "config": {
+            "name": "Stock Series", "first_id": 610, "last_id": 696}})[0], 200)
+        record = {"kind": "skin", "finish": "Stock", "rarity": "common", "flavor": "Standard {weapon.name}."}
+        each = {"table": "weapon", "keys": ["rifle", "shotgun"]}
+        status, data = self.post("preview", {"record": record, "series": "stock", "each": each})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["result"]["item"]["itemdefid"], 610)
+        self.assertEqual(data["result"]["item"]["name"], "Rifle | Stock")
+        status, data = self.post("item/create", {"record": record, "series": "stock", "each": each})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["result"]["ids"], [610, 611])
+        project = self.project()
+        self.assertEqual(project.item(611)["weapon"], "shotgun")
+        self.assertEqual(project.item(611)["flavor"], "Standard Shotgun.")
+        status, data = self.post("item/create", {"record": record, "series": "stock", "each": {"table": "weapon", "keys": []}})
+        self.assertEqual(status, 400)
+
     def test_schema_import(self):
         schema = {"tables": {"visuals": {"columns": ["label"], "rows": {"palette": {"label": "Colorway"}}}},
                   "kinds": {"swatch": {"fields": {"visuals": {"type": "ref", "table": "visuals"}},

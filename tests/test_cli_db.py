@@ -124,6 +124,39 @@ class DatabaseCommandTests(unittest.TestCase):
         self.assertNotIn("kind", self.record(113))
         self.assertEqual(self.items(), items)
 
+    def test_add_one_item_per_table_row(self):
+        for key, ammo in (("pistol", "Basic"), ("rifle", "Bullet"), ("shotgun", "Shell")):
+            self.cli("table", "set", "weapon", key, f"ammo={ammo}")
+        code, out = self.cli("series", "new", "stock", "--name", "Stock Series", "--first-id", "610", "--last-id", "696")
+        self.assertEqual(code, 0, out)
+        code, out = self.cli("add", "stock", "--kind", "skin", "--each", "weapon", "--skip", "Shotgun", "finish=Stock",
+                             "rarity=common", "flavor=The {weapon.name}, as issued ({weapon.ammo}).")
+        self.assertEqual(code, 0, out)
+        self.assertIn("'Pistol | Stock' becomes stock #1, itemdefid 610", out)
+        self.assertIn("'Rifle | Stock' becomes stock #2, itemdefid 611", out)
+        self.assertEqual(list(self.record(611).items()),
+                         [("itemdefid", 611), ("kind", "skin"), ("weapon", "rifle"), ("finish", "Stock"),
+                          ("rarity", "common"), ("flavor", "The Rifle, as issued (Bullet).")])
+        items = self.items()
+        self.assertNotIn(612, items)
+        self.assertEqual(items[610]["tags"], "type:skin;series:stock;rarity:common;weapon:pistol")
+        self.assertEqual(Project.load(self.project_path).series["stock"]["containers"], {})
+
+        code, out = self.cli("add", "stock", "--each", "weapon", "--only", "shotgun", "name={weapon.name} Sticker")
+        self.assertEqual(code, 0, out)  # a plain item gets a weapon: tag
+        self.assertEqual(self.items()[612]["name"], "Shotgun Sticker")
+        self.assertIn("weapon:shotgun", self.items()[612]["tags"])
+
+        self.cli("table", "new", "stickers", "name")
+        self.cli("table", "set", "stickers", "dot", "name=Dot")
+        for args, error in ((["--each", "weapon", "--only", "knife"], "table 'weapon' has no row 'knife'"),
+                            (["--each", "weapon", "flavor={weapon.color}"], "table 'weapon' has no column 'color'"),
+                            (["--each", "stickers"], "kind 'skin' has no field that holds a row of table 'stickers'"),
+                            (["--only", "pistol"], "--only and --skip choose rows for --each")):
+            code, out = self.cli("add", "stock", "--kind", "skin", *args)
+            self.assertEqual(code, 1, out)
+            self.assertIn(error, out)
+
     def test_release_mode_guards_table_edits(self):
         self.cli("mode", "release")
         code, out = self.cli("table", "set", "weapon", "pistol", "name=Handgun")
