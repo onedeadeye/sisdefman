@@ -144,7 +144,7 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
     fields = derive.fields_of(kind)
     rules = derive.rules_of(kind)
     records = project.by_id()
-    positions = project.series_positions()
+    positions = project.template_series()
     before = {it["itemdefid"]: it for it in project.build()}
 
     def same(a, b, name: str) -> bool:
@@ -242,9 +242,19 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
             continue
         rec = records[i]
         new = {"itemdefid": i, "kind": kind_name}
-        new.update((f, values[i][f]) for f in fields if values[i].get(f) not in (None, ""))
         extras = {k: copy.deepcopy(v) for k, v in rec.items()
-                  if k not in new and k not in rules and k not in fields and k != "kind"}
+                  if k not in rules and k not in fields and k not in ("itemdefid", "kind")}
+        for f, spec in fields.items():
+            value = values[i].get(f)
+            if value in (None, ""):
+                continue
+            if isinstance(spec.get("default"), str) and spec["default"]:
+                # A value the field's default gives anyway is left to the default.
+                others = {k: v for k, v in values[i].items() if k != f}
+                ctx = Context(schema, {**extras, "itemdefid": i, **others}, positions.get(i), kind)
+                if str(ctx.value(f)) == str(value):
+                    continue
+            new[f] = value
         trial, _ = derive.resolve(schema, {**new, **extras}, positions.get(i))
         shown = shown_all[i]
         for name in rules:

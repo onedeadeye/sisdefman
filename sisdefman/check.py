@@ -163,7 +163,7 @@ def check_project(project: Project) -> List[Issue]:
                 add("error", f"series {key!r}: container {cid} does not exist")
             elif project.series_for_id(cid) is not None:
                 add("error", f"series {key!r}: container {cid} is inside a series' ID range")
-            elif not any(t in (c.get("description") or "") for t in LISTING_TOKENS):
+            elif not any(t in str(project.resolve(c)[0].get("description") or "") for t in LISTING_TOKENS):
                 add("warning", f"container of series {key!r} has no {{contents}} in its description, "
                                "so its item list is not generated", cid)
             try:

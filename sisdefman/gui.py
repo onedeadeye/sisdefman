@@ -220,7 +220,7 @@ class App:
                 record["itemdefid"] = slot
             info = project.series_info(key, position, len(ids) + 1, mark_unnamed=True)
         else:
-            info = project.series_positions(mark_unnamed=True).get(record["itemdefid"])
+            info = project.template_series(mark_unnamed=True).get(record["itemdefid"])
         schema = project.schema()
         item, problems = derive.resolve(schema, record, info)
         kind = schema.kind_of(record)

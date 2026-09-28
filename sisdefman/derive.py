@@ -34,6 +34,11 @@ the ``text`` of the row of ``epicflavor`` named by the item's ``mat_id``
 without a warning, when the table has no row for the value, so a paragraph
 using it is left out for those items.
 
+A series' containers (crates) see their series too: ``{series.name}``,
+``{series.count}`` and ``{series}`` work for them, ``{series.index}`` is
+empty. ``{contents}``, ``{contents_no_secret}`` and ``{contents_secret}`` are
+kept as they are, to be replaced by the list of the series' items.
+
 Values stored on an item (every field of an item without a kind, and the
 overrides and extra fields of an item with one) may contain the same
 references. There only references to something known are filled in, so
@@ -53,6 +58,8 @@ FIELD_TYPES = ("text", "multiline", "number", "bool", "ref")
 RESERVED_NAMES = ("itemdefid", "kind", "series", "series_name", "index", "count", "count_no_secret",
                   "count_secret")
 SERIES_NAMES = ("series_name", "index", "count", "count_no_secret", "count_secret")
+# Filled in later with the list of a series' items; templates keep them as they are.
+LISTING_NAMES = ("contents", "contents_no_secret", "contents_secret")
 
 _FORMATTER = string.Formatter()
 _MISSING = object()
@@ -135,7 +142,7 @@ class SeriesValue:
     def __init__(self, info: Optional[SeriesInfo]):
         self.key = info.key if info else ""
         self.name = info.name if info else ""
-        self.index = info.index if info else ""
+        self.index = info.index if info and info.index is not None else ""  # None: a container
         self.count = info.count if info else ""
         if info is None:
             self.count_no_secret = self.count_secret = ""
@@ -248,6 +255,8 @@ class Context:
     def value(self, name: str):
         if name == "itemdefid":
             return self.values.get("itemdefid", "")
+        if name in LISTING_NAMES and name not in self.values and name not in fields_of(self.kind):
+            return "{" + name + "}"
         if name == "series":
             return SeriesValue(self.series)
         if name in SERIES_NAMES:
@@ -260,6 +269,8 @@ class Context:
             default = fields[name].get("default")
             if stored not in (_MISSING, None, ""):
                 raw = stored
+            elif stored is _MISSING and self.strict:
+                raise Unknown(name)  # while adopting: not worked out yet (the default is only a fallback)
             elif isinstance(default, str) and default:
                 raw = self.render(default, f"default of {name}")
             elif stored == "":
@@ -301,7 +312,7 @@ class Context:
 
     def knows(self, name: str) -> bool:
         """Whether a reference in stored text is to something this item has."""
-        if name in ("itemdefid", "tags"):
+        if name in ("itemdefid", "tags") or name in LISTING_NAMES:
             return True
         if name == "series" or name in SERIES_NAMES:
             return self.series is not None

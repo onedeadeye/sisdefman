@@ -395,12 +395,25 @@ class Project:
                 out[m["itemdefid"]] = self.series_info(key, index, len(members), secret, mark_unnamed)
         return out
 
+    def template_series(self, mark_unnamed: bool = False) -> Dict[int, SeriesInfo]:
+        """The series each item's templates see: its own position for series
+        items, and the series (without a position) for its containers."""
+        out = self.series_positions(mark_unnamed)
+        for key in self.series:
+            members = self.members(key)
+            if not self.get_series(key)["containers"]:
+                continue
+            info = self.series_info(key, None, len(members), len(self.secret_ids(key)), mark_unnamed)
+            for cid in self.container_ids(key):
+                out.setdefault(cid, info)
+        return out
+
     def resolve_all(self, positions: Optional[Dict[int, SeriesInfo]] = None
                     ) -> Tuple[Dict[int, dict], Dict[int, List[str]]]:
-        """Every record turned into its Steam definition (before series text,
-        generator rules and container lists), plus problems per itemdefid."""
+        """Every record turned into its Steam definition (before generator
+        rules and container lists), plus problems per itemdefid."""
         schema = self.schema()
-        positions = self.series_positions() if positions is None else positions
+        positions = self.template_series() if positions is None else positions
         resolved, problems = {}, {}
         for rec in self.items:
             item, probs = derive.resolve(schema, rec, positions.get(rec["itemdefid"]))
@@ -412,7 +425,7 @@ class Project:
     def resolve(self, record: dict) -> Tuple[dict, List[str]]:
         """One record (which need not be saved) as a Steam definition, before
         generator rules and container lists."""
-        return derive.resolve(self.schema(), record, self.series_positions().get(record["itemdefid"]))
+        return derive.resolve(self.schema(), record, self.template_series().get(record["itemdefid"]))
 
     def _resolved_members(self, key: str, resolved: Optional[Dict[int, dict]]) -> List[dict]:
         if resolved is None:
@@ -464,8 +477,7 @@ class Project:
         return self.build_with_problems()[0]
 
     def build_with_problems(self) -> Tuple[List[dict], Dict[int, List[str]]]:
-        positions = self.series_positions(mark_unnamed=True)
-        out, problems = self.resolve_all(positions)
+        out, problems = self.resolve_all(self.template_series(mark_unnamed=True))
         for key, s in self.series.items():
             members = self.members(key)
             resolved_members = {m["itemdefid"]: out[m["itemdefid"]] for m in members}

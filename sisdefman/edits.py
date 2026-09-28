@@ -441,7 +441,7 @@ def save_series(project: Project, key: str, config: dict, is_new: bool) -> List[
         if taken:
             raise ProjectError(f"itemdefid {', '.join(sorted(taken))} already belongs to series {other!r}")
     for cid in s["containers"]:
-        if not any(t in (by_id[int(cid)].get("description") or "") for t in LISTING_TOKENS):
+        if not any(t in str(project.resolve(by_id[int(cid)])[0].get("description") or "") for t in LISTING_TOKENS):
             notes.append(f"Put {CONTENTS_TOKEN} in the description of {cid} where the item list should go.")
     if is_new:
         project.insert_series(key, s)

@@ -242,6 +242,8 @@ a value that is ambiguous in one item is settled by another.
 
 - A stored value that a rule doesn't reproduce is kept as an override and listed in the
   report.
+- A value that a field's `default` gives anyway isn't stored, so the default keeps applying
+  (and follows when, say, the series is renamed).
 - An item whose export would change anyway is left alone and listed with the reason.
 
 `sisdefman detach IDS` turns items back into plain definitions.
@@ -522,6 +524,26 @@ Contains one of {series.count_no_secret} appearances from the {series.name}.
 
 ...or one of {series.count_secret} Secret Rare Special Appearances!
 ```
+
+**Crates as a kind.** A crate can be an item of a kind like any other. Its rules see the
+series that lists it as a container: `{series.name}`, `{series.count}` and friends, and
+`{series}` (the key, for its tags); `{series.index}` is empty. `{contents}`,
+`{contents_no_secret}` and `{contents_secret}` are kept as they are and replaced by the list
+on export. For example:
+
+```json
+"crate": {
+  "fields": {"title": {"type": "text"},
+             "origin": {"type": "text", "optional": true, "default": "from the {series.name}"}},
+  "derive": {"type": "item", "name": "{title} Crate",
+             "description": ["Contains an item {origin}.", "{contents_no_secret}"],
+             "icon_url": "https://example.com/crate_{itemdefid}.png",
+             "tags": "type:lootbox;series:{series}"}
+}
+```
+
+A crate converted to it stores only `{"title": "First"}`; one with its own wording keeps an
+`origin`.
 
 ### Creating a series
 
