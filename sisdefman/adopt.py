@@ -104,16 +104,19 @@ def invert(rule, value, ctx: Context) -> Optional[Dict[str, str]]:
         return _invert_one(rule, value, ctx)
     if not isinstance(rule, list) or not all(isinstance(p, str) for p in rule):
         return None
-    # A paragraph is left out when a value it uses is empty, so any paragraph
-    # with a placeholder may be missing from the value.
-    optional = []
+    # A paragraph is left out when a value it uses is empty, so a paragraph
+    # using a value not known yet (or known to be empty) may be missing from
+    # the value. Known values count as fixed text.
+    optional, literal = [], {}
     for n, p in enumerate(rule):
         try:
-            if any(path is not None for _, path, _, _ in _FORMATTER.parse(p)):
-                optional.append(n)
+            segments = list(_FORMATTER.parse(p))
         except ValueError:
             return None
-    literal = {n: sum(len(lit.strip()) for lit, _, _, _ in _FORMATTER.parse(rule[n])) for n in optional}
+        known = [_known(ctx, path, spec) for _, path, spec, _ in segments if path is not None]
+        if any(k is None or k == "" for k in known):
+            optional.append(n)
+            literal[n] = sum(len(lit.strip()) for lit, _, _, _ in segments) + sum(len(k) for k in known if k)
     for size in range(len(optional) + 1):
         # Leave out paragraphs with the least fixed text first ({flavor} before "Applies {finish}.").
         for omit in sorted(itertools.combinations(optional, size), key=lambda c: sum(literal[n] for n in c)):
@@ -246,14 +249,17 @@ def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
                   if k not in rules and k not in fields and k not in ("itemdefid", "kind")}
         for f, spec in fields.items():
             value = values[i].get(f)
-            if value in (None, ""):
+            if value is None:
                 continue
             if isinstance(spec.get("default"), str) and spec["default"]:
-                # A value the field's default gives anyway is left to the default.
+                # A value the field's default gives anyway is left to the default;
+                # an empty one where the default gives text is kept, to leave it out.
                 others = {k: v for k, v in values[i].items() if k != f}
                 ctx = Context(schema, {**extras, "itemdefid": i, **others}, positions.get(i), kind)
                 if str(ctx.value(f)) == str(value):
                     continue
+            elif value == "":
+                continue
             new[f] = value
         trial, _ = derive.resolve(schema, {**new, **extras}, positions.get(i))
         shown = shown_all[i]

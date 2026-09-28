@@ -3,7 +3,9 @@
 A *kind* describes a family of similar items (for example weapon skins):
 
 * ``fields`` are the values entered for each item (``weapon``, ``finish``,
-  ``flavor``...). They are stored in the item's record but not exported.
+  ``flavor``...). They are stored in the item's record but not exported. A
+  field's ``default`` is used by items that store no value for it; an item
+  that stores an empty value leaves the field out instead.
 * ``derive`` gives a rule for each Steam field the kind produces. A rule is a
   template string such as ``"{weapon.name} | {finish}"``, a list of template
   strings (paragraphs, joined with a blank line; a paragraph is left out when
@@ -269,12 +271,12 @@ class Context:
             default = fields[name].get("default")
             if stored not in (_MISSING, None, ""):
                 raw = stored
+            elif stored == "":
+                raw = ""  # stored empty: this item leaves it out (the default is not used)
             elif stored is _MISSING and self.strict:
                 raise Unknown(name)  # while adopting: not worked out yet (the default is only a fallback)
             elif isinstance(default, str) and default:
                 raw = self.render(default, f"default of {name}")
-            elif stored == "":
-                raw = ""
             elif self.strict:
                 raise Unknown(name)
             else:
@@ -479,7 +481,7 @@ def resolve(schema: Schema, record: dict, series: Optional[SeriesInfo] = None) -
     for name, spec in fields.items():
         value = record.get(name)
         if value in (None, ""):
-            if not spec.get("optional") and not spec.get("default"):
+            if not spec.get("optional") and (value == "" or not spec.get("default")):
                 ctx.problem(f"{name} is empty")
             continue
         kind_type = spec.get("type", "text")

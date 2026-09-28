@@ -83,6 +83,15 @@ def check_project(project: Project) -> List[Issue]:
             add("error", f"unknown type {kind!r} (expected one of {', '.join(steam.ITEM_TYPES)})", i)
         if not it.get("name"):
             add("warning", "has no name", i)
+        kind_def = project.kinds.get(records[i].get("kind"))
+        if isinstance(kind_def, dict):
+            stray = [k for k in records[i] if k != "kind" and k not in derive.fields_of(kind_def)
+                     and k not in derive.rules_of(kind_def) and not steam.is_steam_field(k)]
+            if stray:
+                add("warning", f"stores {', '.join(stray)}, which {'is' if len(stray) == 1 else 'are'} neither a "
+                               f"field of kind {records[i]['kind']!r} nor a Steam field, so it is exported as it "
+                               f"is. If it is left over from a renamed or removed field, remove it (`sisdefman set "
+                               f"{i} --unset {stray[0]}`, or its remove button under Other fields in the GUI).", i)
         for color in ("name_color", "background_color"):
             if color in it and not steam.is_hex_color(it[color]):
                 add("warning", f"{color} {it[color]!r} is not a six-digit hex colour", i)

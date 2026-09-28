@@ -7,6 +7,7 @@ import unittest
 import unittest.mock
 
 from sisdefman import cli, ui
+from sisdefman.project import Project
 
 from tests import fixtures
 
@@ -84,6 +85,18 @@ class DatabaseCommandTests(unittest.TestCase):
         self.assertIn("not a row of table 'weapon'", out)
         code, out = self.cli("set", "110", "kind=other")
         self.assertEqual(code, 1)
+
+    def test_leave_out_a_default(self):
+        project = Project.load(self.project_path)
+        project.kinds["skin"]["fields"]["flavor"]["default"] = "Standard issue."
+        project.save()
+        self.assertTrue(self.items()[110]["description"].endswith("Standard issue."))
+        code, out = self.cli("set", "110", "--leave-out", "flavor")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.record(110)["flavor"], "")
+        self.assertEqual(self.items()[110]["description"], "Applies the Red appearance to the Pistol.")
+        self.cli("set", "110", "--unset", "flavor")
+        self.assertTrue(self.items()[110]["description"].endswith("Standard issue."))
 
     def test_tables(self):
         code, out = self.cli("table", "show", "weapon")

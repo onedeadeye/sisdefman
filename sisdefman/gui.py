@@ -36,15 +36,6 @@ from .project import DEFAULT_DUMMY_ITEM, MODES, Project, ProjectError
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 UNDO_LIMIT = 100
 
-STEAM_FIELDS = [
-    "type", "name", "display_type", "description", "name_color", "background_color", "icon_url",
-    "icon_url_large", "tradable", "marketable", "tags", "bundle", "exchange", "tag_generators",
-    "tag_generator_name", "tag_generator_values", "price", "price_category", "promo", "drop_start_time",
-    "drop_interval", "use_drop_window", "drop_window", "drop_max_per_window", "use_drop_limit",
-    "drop_limit", "granted_manually", "use_bundle_price", "auto_stack", "hidden", "store_hidden",
-    "store_tags", "store_images", "game_only", "purchase_limit", "item_slot", "accessory_tag",
-]
-
 
 class NeedsConfirmation(Exception):
     def __init__(self, action: str, impacts: List[safety.Impact], message: str = ""):
@@ -182,7 +173,7 @@ class App:
                      if isinstance(live_info, dict) else None),
             "undo": [label for label, _ in self.undo_stack][-10:],
             "field_types": list(derive.FIELD_TYPES),
-            "steam_fields": STEAM_FIELDS,
+            "steam_fields": list(steam.STEAM_FIELDS),
             "default_dummy": DEFAULT_DUMMY_ITEM,
             "export_path": os.path.join(os.path.dirname(self.path), "itemdefs.json"),
         }
@@ -200,6 +191,9 @@ class App:
         if not isinstance(record, dict):
             raise ProjectError("record must be an object")
         record = dict(record)
+        if isinstance(draft, dict) and draft.get("field_renames"):
+            project.kinds[name] = copy.deepcopy(project.kinds[name])
+            edits.rename_kind_fields(project.kinds[name], [record], draft["field_renames"])
         record.setdefault("itemdefid", 0)
         if not isinstance(record["itemdefid"], int):
             raise ProjectError("itemdefid must be a number")
@@ -255,7 +249,7 @@ class App:
         if route == "items/set":
             assignments = [(f, v) for f, v in body.get("assignments", [])]
             return self.mutate("This change", lambda p: {"notes": edits.set_fields(
-                p, body.get("ids", []), assignments, body.get("unset", []))}, confirm)
+                p, body.get("ids", []), assignments, body.get("unset", []), body.get("leave_out", []))}, confirm)
         if route == "items/adopt":
             if body.get("dry_run"):
                 project = self.load()
@@ -294,7 +288,7 @@ class App:
             return self.mutate("Deleting this table", lambda p: edits.delete_table(p, body["name"]), confirm)
         if route == "kind/save":
             return self.mutate("This kind change", lambda p: edits.replace_kind(
-                p, body["name"], body["kind"], body.get("old_name")), confirm)
+                p, body["name"], body["kind"], body.get("old_name"), body.get("field_renames")), confirm)
         if route == "schema/import":
             data = body.get("schema")
             if isinstance(data, str):

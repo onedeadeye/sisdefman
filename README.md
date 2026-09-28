@@ -171,9 +171,15 @@ every skin of that weapon follows.
   - `bool`;
   - `ref`, which needs a `table`.
 
-  Mark a field `optional` if it may be empty. A `default` is a template used when the field
-  is empty. Fields are not exported unless a rule outputs them, like `"mat_id": "{mat_id}"`
-  above.
+  Mark a field `optional` if it may be empty. A `default` is a template used by items that
+  store no value for the field. An item can **leave the field out** instead: tick "leave out"
+  next to the field in the GUI, or `sisdefman set 5 --leave-out closing`. That stores an
+  empty value, so a paragraph using the field is left out for that item. Fields are not
+  exported unless a rule outputs them, like `"mat_id": "{mat_id}"` above.
+
+  Renaming a field in the GUI's kind editor moves the items' values to the new name and
+  updates `{references}` to it in the kind's rules. A value left on an item under a name the
+  kind no longer has (a removed field, say) is exported as it is. `check` warns about it.
 - **Rules:**
   - A **template** string.
   - A **list of templates**, one per paragraph, joined with a blank line. A paragraph is
@@ -243,7 +249,8 @@ a value that is ambiguous in one item is settled by another.
 - A stored value that a rule doesn't reproduce is kept as an override and listed in the
   report.
 - A value that a field's `default` gives anyway isn't stored, so the default keeps applying
-  (and follows when, say, the series is renamed).
+  (and follows when, say, the series is renamed). If a paragraph using a field with a
+  default is missing, the item stores an empty value, which leaves the field out.
 - An item whose export would change anyway is left alone and listed with the reason.
 
 `sisdefman detach IDS` turns items back into plain definitions.
@@ -380,6 +387,7 @@ sisdefman query -w series=crate1 -w '!flavor' --format csv > missing-flavor.csv
 sisdefman set 110-114 "flavor=Painted by hand."    # a range of IDs
 sisdefman set --where tags.rarity=epic marketable:=false
 sisdefman set 110 --unset name_color
+sisdefman set 5 --leave-out closing                # empty instead of the field's default
 
 sisdefman table show weapon -c name,class,Range
 sisdefman table set weapon pistol name=Handgun class=Basic
@@ -545,6 +553,12 @@ on export. For example:
 A crate converted to it stores only `{"title": "First"}`; one with its own wording keeps an
 `origin`.
 
+A closing line that fits most crates but not all, such as "...or a Secret Rare!" for a crate
+without secret rares, works as a field with a default:
+`"closing": {"type": "text", "optional": true, "default": "...or a Secret Rare!"}` with
+`"{closing}"` as a paragraph. The crate without secret rares leaves `closing` out ("leave
+out" in the GUI, or `sisdefman set 5 --leave-out closing`).
+
 ### Creating a series
 
 ```sh
@@ -684,7 +698,9 @@ the next free one. Appending is always safe.
     common colour);
   - an exchange recipe on a generator with an empty bundle, so the exchange grants nothing;
   - references to missing or dummy items; series tags that don't match the ID ranges;
-  - a series range far larger than it needs (every definition added inside it joins the series).
+  - a series range far larger than it needs (every definition added inside it joins the series);
+  - a value on an item of a kind that is neither a field of the kind nor a Steam field, such as
+    one left over from a renamed field (it would be exported as it is).
 - **Notes:** unused IDs inside a series, empty generators, tag generators nothing uses, and
   generators nothing refers to (reachable only if your game server grants them).
 

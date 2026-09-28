@@ -14,13 +14,16 @@ RESERVED_FIELDS = ("itemdefid", "kind")
 
 
 def set_fields(project: Project, ids: Iterable[int], assignments: List[Tuple[str, object]],
-               unset: Iterable[str] = ()) -> List[str]:
+               unset: Iterable[str] = (), leave_out: Iterable[str] = ()) -> List[str]:
     """Store values on items (a kind field, an override of a derived field or
-    a plain Steam field) and remove others. Returns notes for the user."""
+    a plain Steam field) and remove others. ``leave_out`` names kind fields
+    the items leave empty even though the field has a default. Returns notes
+    for the user."""
     schema = project.schema()
     records = project.by_id()
     notes: List[str] = []
     unset = list(unset)
+    leave_out = list(leave_out)
     for field, _ in assignments:
         if field == "itemdefid":
             raise ProjectError("itemdefid cannot be set; use `move` to change an item's position")
@@ -51,6 +54,13 @@ def set_fields(project: Project, ids: Iterable[int], assignments: List[Tuple[str
             if field in RESERVED_FIELDS:
                 raise ProjectError(f"{field} cannot be removed")
             rec.pop(field, None)
+        for field in leave_out:
+            if field not in fields:
+                raise ProjectError(f"{i}: {field} is not a field of its kind; only kind fields can be left out")
+            if fields[field].get("default"):
+                rec[field] = ""
+            else:
+                rec.pop(field, None)  # without a default, not storing it leaves it out
     return notes
 
 
@@ -291,7 +301,49 @@ def kind_users(project: Project, name: str) -> List[int]:
     return [rec["itemdefid"] for rec in project.items if rec.get("kind") == name]
 
 
-def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str] = None) -> None:
+def rename_kind_fields(kind: dict, records: List[dict], renames: Dict[str, str]) -> Dict[str, str]:
+    """Carry renamed fields of a kind over: the values stored on ``records``
+    (items of the kind) move to the new names, and references to the old
+    names in the kind's rules and defaults and in the items' stored values
+    follow, unless the kind now has another field of the old name. Changes
+    ``kind`` and ``records`` in place; returns the renames applied."""
+    fields = derive.fields_of(kind)
+    renames = {old: new for old, new in (renames or {}).items()
+               if isinstance(old, str) and isinstance(new, str) and old != new and new in fields}
+    if not renames:
+        return {}
+    for rec in records:
+        moved = {new: rec.pop(old) for old, new in renames.items() if old in rec}
+        rec.update(moved)
+    follow = [old for old in renames if old not in fields or old in renames.values()]
+    if follow:
+        pattern = re.compile(r"\{(" + "|".join(map(re.escape, sorted(follow, key=len, reverse=True)))
+                             + r")(?=[}\[.:!])")
+
+        def fix(value):
+            if isinstance(value, str):
+                return pattern.sub(lambda m: "{" + renames[m.group(1)], value)
+            if isinstance(value, list):
+                return [fix(v) for v in value]
+            return value
+
+        rules = kind.get("derive", {})
+        for rule in list(rules):
+            rules[rule] = fix(rules[rule])
+        for spec in fields.values():
+            if isinstance(spec, dict) and "default" in spec:
+                spec["default"] = fix(spec["default"])
+        for rec in records:
+            for key in list(rec):
+                if key not in derive.STRUCTURAL_FIELDS:
+                    rec[key] = fix(rec[key])
+    return renames
+
+
+def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str] = None,
+                 field_renames: Optional[Dict[str, str]] = None) -> None:
+    """Save a kind (renaming it from ``old_name``). ``field_renames`` maps old
+    field names to new ones, so the kind's items keep their values."""
     if not name.isidentifier():
         raise ProjectError("kind names may only contain letters, digits and _")
     if not isinstance(kind.get("fields", {}), dict) or not isinstance(kind.get("derive", {}), dict):
@@ -303,8 +355,9 @@ def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str
         for rec in project.items:
             if rec.get("kind") == old_name:
                 rec["kind"] = name
-    project.kinds[name] = {"fields": copy.deepcopy(kind.get("fields", {})),
-                           "derive": copy.deepcopy(kind.get("derive", {}))}
+    new = {"fields": copy.deepcopy(kind.get("fields", {})), "derive": copy.deepcopy(kind.get("derive", {}))}
+    rename_kind_fields(new, [rec for rec in project.items if rec.get("kind") == name], field_renames or {})
+    project.kinds[name] = new
     problems = derive.schema_errors(project.schema())
     if problems:
         raise ProjectError("; ".join(problems))

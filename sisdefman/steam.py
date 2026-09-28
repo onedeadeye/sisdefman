@@ -19,6 +19,23 @@ FIELD_ORDER = ("itemdefid", "type", "exchange", "bundle", "name", "display_type"
                "tag_generators")
 
 
+# The fields of a definition (besides itemdefid) that Steam knows.
+STEAM_FIELDS = (
+    "type", "name", "display_type", "description", "name_color", "background_color", "icon_url",
+    "icon_url_large", "tradable", "marketable", "tags", "bundle", "exchange", "tag_generators",
+    "tag_generator_name", "tag_generator_values", "price", "price_category", "promo", "drop_start_time",
+    "drop_interval", "use_drop_window", "drop_window", "drop_max_per_window", "use_drop_limit",
+    "drop_limit", "granted_manually", "use_bundle_price", "auto_stack", "hidden", "store_hidden",
+    "store_tags", "store_images", "game_only", "purchase_limit", "item_slot", "accessory_tag",
+)
+# Localized text: name_german, description_schinese...
+_LOCALIZED = re.compile(r"^(?:name|description|display_type)_[a-z]+$")
+
+
+def is_steam_field(name: str) -> bool:
+    return name in ("itemdefid", "appid") or name in STEAM_FIELDS or bool(_LOCALIZED.match(name))
+
+
 def in_field_order(item: dict) -> dict:
     rank = {k: n for n, k in enumerate(FIELD_ORDER)}
     return dict(sorted(item.items(), key=lambda kv: rank.get(kv[0], len(rank))))  # stable for the rest

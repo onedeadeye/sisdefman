@@ -591,12 +591,12 @@ def cmd_set(args) -> int:
     project = _load(args)
     ids, rest = query.split_targets(args.items)
     assignments = [query.parse_assignment(a) for a in rest]
-    if not assignments and not args.unset:
-        raise ProjectError("nothing to change: give FIELD=VALUE, FIELD:=JSON or --unset FIELD")
+    if not assignments and not args.unset and not args.leave_out:
+        raise ProjectError("nothing to change: give FIELD=VALUE, FIELD:=JSON, --unset FIELD or --leave-out FIELD")
     ids = _targets(args, project, [str(i) for i in ids])
     print(_mode_tag(project))
     protect = safety.protected_before(project, project.build())
-    for note in edits.set_fields(project, ids, assignments, args.unset or []):
+    for note in edits.set_fields(project, ids, assignments, args.unset or [], args.leave_out or []):
         print(ui.dim(f"  note: {note}"))
     print(f"Updated {len(ids)} item(s).")
     return _guarded_save(args, project, protect, "This change")
@@ -941,6 +941,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-w", "--where", action="append", metavar="COND", help="select items by condition")
     p.add_argument("--unset", action="append", metavar="FIELD",
                    help="remove a stored value (for a derived field: go back to the rule)")
+    p.add_argument("--leave-out", action="append", metavar="FIELD",
+                   help="leave a kind field empty instead of using its default (a paragraph using it is left out)")
     guarded(p)
     p.set_defaults(func=cmd_set, extra_dest="items")
 

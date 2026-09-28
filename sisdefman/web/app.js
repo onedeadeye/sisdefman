@@ -974,9 +974,22 @@ function renderKindFields(rec, kind) {
       input = h("input", { type: "text", value: value ?? "", oninput: (ev) => set(ev.target.value) });
     }
     if (spec.default && "placeholder" in input) input.placeholder = "default: " + spec.default;
+    let leaveOut = null;
+    if (spec.default && spec.type !== "bool") {
+      // A stored empty value: this item leaves the field out instead of using the default.
+      const off = value === "";
+      const control = input.tagName === "DIV" ? input.querySelector("select") : input;
+      if (off && control) { control.disabled = true; if ("placeholder" in control) control.placeholder = "left out"; }
+      leaveOut = h("label", { class: "check", title: "Leave this field empty for this item instead of using the default; a paragraph using it is left out." },
+        h("input", { type: "checkbox", checked: off, onchange: (ev) => {
+          if (ev.target.checked) rec[name] = ""; else delete rec[name];
+          changed(); render();
+        } }), "leave out");
+    }
     return h("div", { class: "field" },
       h("div", { class: "label" }, h("b", {}, name),
-        h("span", {}, spec.type === "ref" ? `from table ${spec.table}` : spec.type || "text", spec.optional ? " · optional" : "")),
+        h("span", {}, spec.type === "ref" ? `from table ${spec.table}` : spec.type || "text", spec.optional ? " · optional" : "",
+          leaveOut ? [" · ", leaveOut] : null)),
       input);
   });
   return h("div", { class: "section" }, h("h5", {}, "Fields"), rows.length ? rows : h("div", { class: "hint" }, "This kind has no fields."));
@@ -1150,7 +1163,7 @@ function makeKindDraft(name) {
   return {
     for: name, name, old: name, sample: null,
     fields: Object.entries(k.fields || {}).map(([n, spec]) => ({
-      name: n, type: spec.type || "text", table: spec.table || "", optional: !!spec.optional, default: spec.default || "",
+      orig: n, name: n, type: spec.type || "text", table: spec.table || "", optional: !!spec.optional, default: spec.default || "",
     })),
     rules: Object.entries(k.derive || {}).map(([field, r]) => ({
       field,
@@ -1188,6 +1201,13 @@ function kindFromDraft(d) {
   return { fields, derive };
 }
 
+/* Fields of the draft renamed since it was opened: old name -> new name. */
+function fieldRenames(d) {
+  const out = {};
+  for (const f of d.fields) if (f.orig && f.name.trim() && f.name.trim() !== f.orig) out[f.orig] = f.name.trim();
+  return out;
+}
+
 const previewKind = debounce(async () => {
   const d = ui.kindDraft;
   if (!d || !refs.kindPreview) return;
@@ -1199,7 +1219,7 @@ const previewKind = debounce(async () => {
   const name = d.name.trim() || d.old;
   const record = { ...sample.record, kind: name };
   try {
-    const { result } = await request("preview", { record, kind_draft: { name, old_name: d.old, kind } });
+    const { result } = await request("preview", { record, kind_draft: { name, old_name: d.old, kind, field_renames: fieldRenames(d) } });
     refs.kindPreview.textContent = (result.problems.length ? "Problems:\n  " + result.problems.join("\n  ") + "\n\n" : "")
       + JSON.stringify(result.item, null, 2);
   } catch (e) { refs.kindPreview.textContent = e.message; }
@@ -1315,7 +1335,7 @@ function renderKindsPage() {
     try { kind = kindFromDraft(d); } catch (e) { toast(e.message, true); return; }
     const name = d.name.trim();
     if (!name) { toast("Give the kind a name.", true); return; }
-    const r = await mutate("kind/save", { name, old_name: d.old, kind }, `Saved kind ${name}.`);
+    const r = await mutate("kind/save", { name, old_name: d.old, kind, field_renames: fieldRenames(d) }, `Saved kind ${name}.`);
     if (r) { ui.kindSel = name; ui.kindDraft = null; render(); }
   };
   const del = async () => {
@@ -1341,7 +1361,9 @@ function renderKindsPage() {
           h("h3", {}, "Fields entered for each item"),
           h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Table (for ref)"),
             h("th", {}, "Optional"), h("th", {}, "Default (template)"), h("th", {}))), h("tbody", {}, fieldRows)),
-          h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.fields.push({ name: "", type: "text", table: "", optional: false, default: "" }); again(); } }, "+ Field")),
+          h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.fields.push({ name: "", type: "text", table: "", optional: false, default: "" }); again(); } }, "+ Field"),
+          h("div", { class: "hint", style: "margin-top:6px" }, "Renaming a field moves the items' values (and {references} in these rules) to the new name. "
+            + "Items without a value use the default; an item can tick \"leave out\" to use none.")),
         h("div", { class: "card" },
           h("h3", {}, "Derived Steam fields"),
           h("datalist", { id: "steam-fields-kind" }, S.steam_fields.map((f) => h("option", { value: f }))),

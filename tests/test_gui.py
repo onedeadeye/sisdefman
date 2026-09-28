@@ -253,6 +253,32 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(project.item(999999)["description"], "Common is {rarity.hex:>8}.")
         self.assertEqual([i for i in self.call("GET", "/api/state")[1]["result"]["issues"] if i["level"] != "note"], [])
 
+    def test_renaming_a_kind_field_and_leaving_a_default_out(self):
+        self.post("items/adopt", {"kind": "skin", "ids": list(range(110, 118))})
+        self.post("items/set", {"ids": [110], "assignments": [["flavor", "Painted red."]]})
+        kind = self.project().kinds["skin"]
+        kind["fields"]["note"] = kind["fields"].pop("flavor")
+        record = self.project().item(110)
+        status, data = self.post("preview", {"record": record, "kind_draft": {
+            "name": "skin", "old_name": "skin", "kind": kind, "field_renames": {"flavor": "note"}}})
+        self.assertTrue(data["result"]["item"]["description"].endswith("Painted red."))
+        self.assertEqual(self.post("kind/save", {"name": "skin", "old_name": "skin", "kind": kind,
+                                                 "field_renames": {"flavor": "note"}})[0], 200)
+        project = self.project()
+        self.assertEqual(project.item(110)["note"], "Painted red.")
+        self.assertNotIn("flavor", project.item(110))
+        self.assertEqual(project.kinds["skin"]["derive"]["description"][1], "{note}")
+
+        kind = self.project().kinds["skin"]
+        kind["fields"]["note"]["default"] = "Standard issue."
+        self.assertEqual(self.post("kind/save", {"name": "skin", "old_name": "skin", "kind": kind})[0], 200)
+        built = {i["itemdefid"]: i for i in self.project().build()}
+        self.assertEqual(built[111]["description"], "Applies the Blue appearance to the Rifle.\n\nStandard issue.")
+        self.assertEqual(self.post("items/set", {"ids": [111], "assignments": [], "leave_out": ["note"]})[0], 200)
+        self.assertEqual(self.project().item(111)["note"], "")
+        built = {i["itemdefid"]: i for i in self.project().build()}
+        self.assertEqual(built[111]["description"], "Applies the Blue appearance to the Rifle.")
+
     def test_schema_import(self):
         schema = {"tables": {"visuals": {"columns": ["label"], "rows": {"palette": {"label": "Colorway"}}}},
                   "kinds": {"swatch": {"fields": {"visuals": {"type": "ref", "table": "visuals"}},
