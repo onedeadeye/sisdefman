@@ -838,6 +838,16 @@ function renderEditorPanel() {
     Object.keys(S.kinds).map((k) => h("option", { value: k }, k)));
     sel.value = rec.kind || "";
     body.push(h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Kind")), sel));
+  } else if (rec.kind && S.kinds[rec.kind]) {
+    // An item can switch between a kind and its sub-types: they share fields.
+    const root = kindFamily(rec.kind);
+    const family = [root, ...kindDescendants(root)].filter((k) => S.kinds[k]);
+    if (family.length > 1) {
+      const sel = h("select", { onchange: () => { rec.kind = sel.value; changed(); render(); } },
+        family.map((k) => h("option", { value: k }, k + (S.kind_defs[k] && S.kind_defs[k].extends ? ` (sub-type of ${S.kind_defs[k].extends})` : ""))));
+      sel.value = rec.kind;
+      body.push(h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Kind"), h("span", {}, "switch to a related kind")), sel));
+    }
   }
   if (d.mode === "create" && d.series && kind) body.push(renderEachRow(d, kind));
   if (kind) {
@@ -1211,36 +1221,56 @@ async function removeDialog(e) {
 
 /* ------------------------------------------------------------ kinds page */
 
+/* The kind at the top of a kind's chain of "extends". */
+function kindFamily(name) {
+  const seen = [name];
+  for (;;) {
+    const base = (S.kind_defs[seen[seen.length - 1]] || {}).extends;
+    if (!base || !S.kind_defs[base] || seen.includes(base)) return seen[seen.length - 1];
+    seen.push(base);
+  }
+}
+
+/* Kinds that extend `name`, directly or through others. */
+function kindDescendants(name) {
+  const out = [];
+  const todo = [name];
+  while (todo.length) {
+    const parent = todo.pop();
+    for (const [k, def] of Object.entries(S.kind_defs)) {
+      if (def.extends === parent && k !== name && !out.includes(k)) { out.push(k); todo.push(k); }
+    }
+  }
+  return out;
+}
+
 function makeKindDraft(name) {
   if (!name || name === "__new__") {
-    return { for: name, name: "", old: null, fields: [], rules: [], sample: null };
+    const base = ui.kindBase && S.kinds[ui.kindBase] ? ui.kindBase : "";
+    return { for: name, name: "", old: null, extends: base, fields: [], rules: [], sample: null };
   }
-  const k = S.kinds[name];
+  const k = S.kind_defs[name] || S.kinds[name];
   return {
-    for: name, name, old: name, sample: null,
+    for: name, name, old: name, sample: null, extends: k.extends || "",
     fields: Object.entries(k.fields || {}).map(([n, spec]) => ({
       orig: n, name: n, type: spec.type || "text", table: spec.table || "", optional: !!spec.optional, default: spec.default || "",
     })),
-    rules: Object.entries(k.derive || {}).map(([field, r]) => ({
-      field,
-      mode: Array.isArray(r) ? "paragraphs" : typeof r === "string" ? "template" : "value",
-      text: typeof r === "string" ? r : "",
-      paragraphs: Array.isArray(r) ? r.map(String) : [""],
-      json: typeof r === "string" || Array.isArray(r) ? "" : JSON.stringify(r),
-    })),
+    rules: Object.entries(k.derive || {}).map(([field, r]) => ruleDraft(field, r)),
   };
 }
 
 function kindFromDraft(d) {
   const fields = {};
+  const inherited = kindBaseFields(d);
   for (const f of d.fields) {
     const n = f.name.trim();
     if (!n) throw new Error("Every field needs a name.");
     if (n in fields) throw new Error(`Two fields are called ${n}.`);
     const spec = { type: f.type };
     if (f.type === "ref") spec.table = f.table;
-    if (f.optional) spec.optional = true;
-    if (f.default) spec.default = f.default;
+    // Changing an inherited field: write everything, so nothing unticked is inherited.
+    if (f.optional || n in inherited) spec.optional = !!f.optional;
+    if (f.default || n in inherited) spec.default = f.default || "";
     fields[n] = spec;
   }
   const derive = {};
@@ -1254,7 +1284,29 @@ function kindFromDraft(d) {
       try { derive[n] = JSON.parse(r.json); } catch (e) { throw new Error(`The value for ${n} is not valid JSON (e.g. true, false, 5 or "text").`); }
     }
   }
-  return { fields, derive };
+  return d.extends ? { extends: d.extends, fields, derive } : { fields, derive };
+}
+
+const kindBaseFields = (d) => (d.extends && S.kinds[d.extends] ? S.kinds[d.extends].fields || {} : {});
+const kindBaseRules = (d) => (d.extends && S.kinds[d.extends] ? S.kinds[d.extends].derive || {} : {});
+
+/* Items to preview a kind draft with: its own, or else those of the kind it extends. */
+function kindSamples(d) {
+  const own = S.items.filter((e) => e.record && d.old && e.record.kind === d.old);
+  if (own.length || !d.extends) return own;
+  const family = [d.extends, ...kindDescendants(d.extends)];
+  return S.items.filter((e) => e.record && family.includes(e.record.kind));
+}
+
+/* A rule as a draft row. */
+function ruleDraft(field, r) {
+  return {
+    field,
+    mode: Array.isArray(r) ? "paragraphs" : typeof r === "string" ? "template" : "value",
+    text: typeof r === "string" ? r : "",
+    paragraphs: Array.isArray(r) ? r.map(String) : [""],
+    json: typeof r === "string" || Array.isArray(r) ? "" : JSON.stringify(r),
+  };
 }
 
 /* Fields of the draft renamed since it was opened: old name -> new name. */
@@ -1267,7 +1319,7 @@ function fieldRenames(d) {
 const previewKind = debounce(async () => {
   const d = ui.kindDraft;
   if (!d || !refs.kindPreview) return;
-  const users = S.items.filter((e) => e.record && e.record.kind === d.old);
+  const users = kindSamples(d);
   const sample = users.find((e) => e.id === d.sample) || users[0];
   if (!sample) { refs.kindPreview.textContent = "No item uses this kind yet."; return; }
   let kind;
@@ -1315,6 +1367,42 @@ function exportSchema() {
   document.body.append(a); a.click(); a.remove();
 }
 
+/* "Based on": the kind this one extends. */
+function renderKindBase(d, again) {
+  const blocked = new Set([d.old, ...(d.old ? kindDescendants(d.old) : [])]);
+  const sel = h("select", { onchange: () => { d.extends = sel.value; again(); previewKind(); } },
+    h("option", { value: "" }, "Nothing (a kind of its own)"),
+    Object.keys(S.kinds).filter((k) => !blocked.has(k)).map((k) => h("option", { value: k }, k)));
+  sel.value = d.extends || "";
+  return h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Based on"),
+    h("span", {}, "a sub-type inherits the fields and rules and changes only some")), sel);
+}
+
+function inheritedFields(d, again) {
+  const own = new Set(d.fields.map((f) => f.name.trim()));
+  const rows = Object.entries(kindBaseFields(d)).filter(([n]) => !own.has(n));
+  if (!rows.length) return null;
+  return h("div", { class: "inherited" }, h("div", { class: "hint" }, `From ${d.extends}:`),
+    rows.map(([n, spec]) => h("div", { class: "row" },
+      h("code", {}, n), h("span", { class: "hint grow" }, (spec.type === "ref" ? `from table ${spec.table}` : spec.type || "text")
+        + (spec.optional ? " · optional" : "") + (spec.default ? ` · default ${spec.default}` : "")),
+      h("button", { class: "btn small", title: "Change this field for this kind (its default, say)", onclick: () => {
+        d.fields.push({ name: n, type: spec.type || "text", table: spec.table || "", optional: !!spec.optional, default: spec.default || "" });
+        again(); previewKind();
+      } }, "Change"))));
+}
+
+function inheritedRules(d, again) {
+  const own = new Set(d.rules.map((r) => r.field.trim()));
+  const rows = Object.entries(kindBaseRules(d)).filter(([f]) => !own.has(f));
+  if (!rows.length) return null;
+  const show = (r) => (Array.isArray(r) ? r.join(" ¶ ") : typeof r === "string" ? r : JSON.stringify(r));
+  return h("div", { class: "inherited" }, h("div", { class: "hint" }, `From ${d.extends} (replace one to change it for this kind):`),
+    rows.map(([f, r]) => h("div", { class: "row" },
+      h("code", {}, f), h("span", { class: "hint grow mono ellipsis", title: show(r) }, show(r)),
+      h("button", { class: "btn small", onclick: () => { d.rules.push(ruleDraft(f, r)); again(); previewKind(); } }, "Replace"))));
+}
+
 function renderKindsPage() {
   const names = Object.keys(S.kinds);
   if (ui.kindSel && ui.kindSel !== "__new__" && !S.kinds[ui.kindSel]) ui.kindSel = null;
@@ -1324,8 +1412,12 @@ function renderKindsPage() {
   const usage = (k) => S.items.filter((e) => e.record && e.record.kind === k).length;
   const list = h("div", { class: "list" },
     names.map((k) => h("button", { class: ui.kindSel === k ? "active" : "", onclick: () => { ui.kindSel = k; render(); } },
-      h("span", {}, k), h("span", { class: "hint" }, usage(k)))),
-    h("button", { class: ui.kindSel === "__new__" ? "active" : "", onclick: () => { ui.kindSel = "__new__"; render(); } }, "+ New kind"));
+      h("span", {}, k, S.kind_defs[k] && S.kind_defs[k].extends ? h("span", { class: "hint" }, ` ← ${S.kind_defs[k].extends}`) : null),
+      h("span", { class: "hint" }, usage(k)))),
+    h("button", { class: ui.kindSel === "__new__" && !ui.kindBase ? "active" : "",
+      onclick: () => { ui.kindSel = "__new__"; ui.kindBase = null; ui.kindDraft = null; render(); } }, "+ New kind"),
+    d.old ? h("button", { class: ui.kindSel === "__new__" && ui.kindBase ? "active" : "", title: `A kind that inherits ${d.old}'s fields and rules and changes some of them`,
+      onclick: () => { ui.kindBase = d.old; ui.kindSel = "__new__"; ui.kindDraft = null; render(); } }, `+ Sub-type of ${d.old}`) : null);
 
   const again = () => { render(); };
   const fieldRows = d.fields.map((f, n) => {
@@ -1368,7 +1460,10 @@ function renderKindsPage() {
       editor = h("input", { type: "text", class: "mono", value: r.json, placeholder: "true", oninput: (ev) => { r.json = ev.target.value; previewKind(); } });
     }
     const move = (delta) => { const t = n + delta; if (t < 0 || t >= d.rules.length) return; [d.rules[n], d.rules[t]] = [d.rules[t], d.rules[n]]; again(); previewKind(); };
+    const replaces = r.field.trim() in kindBaseRules(d);
     return h("div", { class: "rule" },
+      replaces ? h("div", { class: "hint" }, `Replaces the rule from ${d.extends}. `,
+        h("button", { class: "linkish", onclick: () => { d.rules.splice(n, 1); again(); previewKind(); } }, `Use ${d.extends}'s rule`)) : null,
       h("div", { class: "row" },
         h("input", { type: "text", class: "mono", style: "max-width:220px", value: r.field, list: "steam-fields-kind", placeholder: "Steam field",
           oninput: (ev) => { r.field = ev.target.value; previewKind(); } }),
@@ -1379,7 +1474,7 @@ function renderKindsPage() {
       editor);
   });
 
-  const users = S.items.filter((e) => e.record && e.record.kind === d.old);
+  const users = kindSamples(d);
   const sampleSel = users.length ? h("select", { onchange: (ev) => { d.sample = Number(ev.target.value); previewKind(); } },
     users.map((e) => h("option", { value: e.id }, `${e.id}: ${e.item.name}`))) : null;
   if (sampleSel && d.sample) sampleSel.value = String(d.sample);
@@ -1414,15 +1509,18 @@ function renderKindsPage() {
         h("div", { class: "card" },
           h("div", { class: "field" }, h("div", { class: "label" }, h("b", {}, "Name"), d.old ? h("span", {}, plural(usage(d.old), "item")) : null),
             h("input", { type: "text", value: d.name, class: "mono", placeholder: "e.g. skin", oninput: (ev) => { d.name = ev.target.value; } })),
+          renderKindBase(d, again),
           h("h3", {}, "Fields entered for each item"),
-          h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Table (for ref)"),
-            h("th", {}, "Optional"), h("th", {}, "Default (template)"), h("th", {}))), h("tbody", {}, fieldRows)),
+          inheritedFields(d, again),
+          d.fields.length || !d.extends ? h("table", { class: "edit" }, h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Table (for ref)"),
+            h("th", {}, "Optional"), h("th", {}, "Default (template)"), h("th", {}))), h("tbody", {}, fieldRows)) : null,
           h("button", { class: "btn small", style: "margin-top:6px", onclick: () => { d.fields.push({ name: "", type: "text", table: "", optional: false, default: "" }); again(); } }, "+ Field"),
           h("div", { class: "hint", style: "margin-top:6px" }, "Renaming a field moves the items' values (and {references} in these rules) to the new name. "
             + "Items without a value use the default; an item can tick \"leave out\" to use none.")),
         h("div", { class: "card" },
           h("h3", {}, "Derived Steam fields"),
           h("datalist", { id: "steam-fields-kind" }, S.steam_fields.map((f) => h("option", { value: f }))),
+          inheritedRules(d, again),
           ruleBlocks,
           h("button", { class: "btn small", onclick: () => { d.rules.push({ field: "", mode: "template", text: "", paragraphs: [""], json: "" }); again(); } }, "+ Derived field"),
           h("div", { class: "help", style: "margin-top:12px" },

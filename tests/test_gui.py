@@ -298,6 +298,20 @@ class GuiServerTests(unittest.TestCase):
         status, data = self.post("item/create", {"record": record, "series": "stock", "each": {"table": "weapon", "keys": []}})
         self.assertEqual(status, 400)
 
+    def test_sub_types(self):
+        self.post("items/adopt", {"kind": "skin", "ids": list(range(110, 118))})
+        promo = {"extends": "skin", "fields": {}, "derive": {"name": "{weapon.name} | {finish} (Promo)"}}
+        self.assertEqual(self.post("kind/save", {"name": "promo", "kind": promo})[0], 200)
+        state = self.call("GET", "/api/state")[1]["result"]
+        self.assertEqual(state["kind_defs"]["promo"], promo)
+        self.assertEqual(list(state["kinds"]["promo"]["fields"]), ["weapon", "finish", "rarity", "flavor"])
+        record = dict(self.project().item(110), kind="promo")
+        self.assertEqual(self.post("preview", {"record": record})[1]["result"]["item"]["name"], "Pistol | Red (Promo)")
+        self.assertEqual(self.post("item/save", {"record": record})[0], 200)
+        self.assertEqual({i["itemdefid"]: i for i in self.project().build()}[110]["name"], "Pistol | Red (Promo)")
+        status, data = self.post("kind/delete", {"name": "skin", "detach_items": False})
+        self.assertEqual(status, 400)
+
     def test_schema_import(self):
         schema = {"tables": {"visuals": {"columns": ["label"], "rows": {"palette": {"label": "Colorway"}}}},
                   "kinds": {"swatch": {"fields": {"visuals": {"type": "ref", "table": "visuals"}},

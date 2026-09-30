@@ -208,6 +208,39 @@ every skin of that weapon follows.
   item only: `sisdefman set 110 name_color=ff0000`. Remove it again with
   `sisdefman set 110 --unset name_color`.
 
+### Sub-types
+
+A kind can **extend** another kind. It gets all of that kind's fields and rules and lists only
+what it changes, so a group of items that differs in one way needs no overrides on each item.
+For example, promotional skins that don't show a set count:
+
+```json
+"promoskin": {
+  "extends": "skin",
+  "derive": {
+    "description": ["{weapon.Description} This weapon has the {finish} {visuals.label} appearance applied.",
+                    "[i]{flavor}[/i]",
+                    "{series.name} ({rarity.abbreviation})"]
+  }
+}
+```
+
+- **Rules.** A rule of the sub-type replaces the inherited rule for the same field. Every
+  other rule is inherited, and follows later changes to the base kind.
+- **Fields.** Inherited as they are. An entry for an inherited field changes only what it
+  names: `"fields": {"flavor": {"default": "Handed out at a show."}}` gives the sub-type its
+  own default. New fields can be added too.
+- **Switching.** An item can switch between a kind and its sub-types, since they share their
+  fields: `sisdefman set 110 kind=promoskin`, or the Kind menu in the GUI's item editor.
+  Items of an unrelated kind still go through `detach` and `adopt`.
+- **Chains.** A sub-type can itself be extended. Renaming the base kind or one of its
+  fields updates the sub-types and their items; a kind can't be deleted while another kind
+  extends it.
+
+In the GUI, select a kind and click **+ Sub-type of …**. The editor lists what the sub-type
+inherits: **Replace** copies a rule so you can change it, **Change** does the same for a field,
+and **Use …'s rule** goes back to the inherited one.
+
 ### Flavor text
 
 Give the kind an optional `multiline` field (`flavor` above) and put `"{flavor}"` as a

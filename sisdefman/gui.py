@@ -160,7 +160,8 @@ class App:
             "mode": project.mode,
             "settings": project.settings,
             "tables": project.tables,
-            "kinds": project.kinds,
+            "kinds": schema.kinds,  # complete, with what a sub-type inherits
+            "kind_defs": project.kinds,  # as written
             "colors": project.colors,
             "color_usage": {kw: len(u) for kw, u in colors.usages(project).items()},
             "hex_colors_left": sum(1 for _ in colors._convertible(project)),

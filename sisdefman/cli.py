@@ -675,14 +675,25 @@ def cmd_schema(args) -> int:
     for name, table in project.tables.items():
         print(ui.bold(f"table {name}") + f"  columns: {', '.join(table.get('columns', [])) or '-'}; "
               f"{len(table.get('rows', {}))} row(s)")
-    for name, kind in project.kinds.items():
-        print(ui.bold(f"kind {name}") + f"  ({usage.get(name, 0)} item(s))")
+    schema = project.schema()
+    for name, definition in project.kinds.items():
+        base = derive.base_of(definition)
+        print(ui.bold(f"kind {name}") + (f" extends {base}" if base else "") + f"  ({usage.get(name, 0)} item(s))")
+        kind = schema.kinds.get(name) or {}
+        own_fields, own_rules = derive.fields_of(definition), derive.rules_of(definition)
         for field, spec in derive.fields_of(kind).items():
+            if base and field not in own_fields:
+                continue
             extra = f" -> table {spec.get('table')}" if spec.get("type") == "ref" else ""
             opt = ", optional" if spec.get("optional") else ""
-            print(f"    field {field}: {spec.get('type', 'text')}{extra}{opt}")
-        for field, rule in derive.rules_of(kind).items():
+            default = f", default {json.dumps(spec['default'], ensure_ascii=False)}" if spec.get("default") else ""
+            print(f"    field {field}: {spec.get('type', 'text')}{extra}{opt}{default}")
+        for field, rule in own_rules.items():
             print(f"    {field} = {json.dumps(rule, ensure_ascii=False)}")
+        if base:
+            inherited = [f for f in derive.fields_of(kind) if f not in own_fields] + \
+                        [f for f in derive.rules_of(kind) if f not in own_rules]
+            print(ui.dim(f"    from {base}: {', '.join(dict.fromkeys(inherited)) or 'nothing'}"))
     return 0
 
 

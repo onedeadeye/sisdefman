@@ -83,7 +83,7 @@ def check_project(project: Project) -> List[Issue]:
             add("error", f"unknown type {kind!r} (expected one of {', '.join(steam.ITEM_TYPES)})", i)
         if not it.get("name"):
             add("warning", "has no name", i)
-        kind_def = project.kinds.get(records[i].get("kind"))
+        kind_def = project.schema().kinds.get(records[i].get("kind"))
         if isinstance(kind_def, dict):
             stray = [k for k in records[i] if k != "kind" and k not in derive.fields_of(kind_def)
                      and k not in derive.rules_of(kind_def) and not steam.is_steam_field(k)]
@@ -292,11 +292,12 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
     """Internal identifiers that would reach players: series keys and table
     row keys used in templates for visible text, and placeholders or colour
     keywords left in the exported text."""
-    for kname, kind in project.kinds.items():
-        if not isinstance(kind, dict):
+    schema = project.schema()
+    for kname, definition in project.kinds.items():
+        if not isinstance(definition, dict):
             continue
-        fields = derive.fields_of(kind)
-        for field, rule in derive.rules_of(kind).items():
+        fields = derive.fields_of(schema.kinds.get(kname))  # inherited fields too
+        for field, rule in derive.rules_of(definition).items():  # its own rules
             if not is_visible_field(field):
                 continue
             for path in _paths(rule):
@@ -316,11 +317,10 @@ def _visible_text(project: Project, built: List[dict], add) -> None:
                                    "{series.name} for its display name")
                 elif isinstance(spec, dict) and spec.get("type") == "ref":
                     _bare_key(project, head, spec.get("table"), f"kind {kname!r}: the rule for {field}", add)
-                elif spec is None and head in project.tables and head not in derive.rules_of(kind):
+                elif spec is None and head in project.tables and head not in derive.rules_of(schema.kinds.get(kname)):
                     _bare_key(project, head, head, f"kind {kname!r}: the rule for {field}", add)
     for rec in project.items:
-        kind = project.schema().kind_of(rec)
-        kind_fields = derive.fields_of(kind)
+        kind_fields = derive.fields_of(schema.kind_of(rec))
         for field, value in rec.items():
             if field in kind_fields or not is_visible_field(field):
                 continue

@@ -25,16 +25,28 @@ def set_fields(project: Project, ids: Iterable[int], assignments: List[Tuple[str
     notes: List[str] = []
     unset = list(unset)
     leave_out = list(leave_out)
-    for field, _ in assignments:
+    new_kind = None
+    for field, value in assignments:
         if field == "itemdefid":
             raise ProjectError("itemdefid cannot be set; use `move` to change an item's position")
         if field == "kind":
-            raise ProjectError("use `adopt` to give items a kind and `detach` to remove it")
+            if value not in project.kinds:
+                raise ProjectError(f"no kind named {value!r}")
+            new_kind = value
+    assignments = [(f, v) for f, v in assignments if f != "kind"]
+    for i in ([] if new_kind is None else ids):
+        rec = records.get(i)
+        old = rec.get("kind") if rec else None
+        if not old or derive.family(project.kinds, old) != derive.family(project.kinds, new_kind):
+            raise ProjectError(f"{i}: an item can only switch between a kind and the kinds that extend it "
+                               f"(use `adopt` to give an item a kind and `detach` to remove it)")
     for i in ids:
         rec = records.get(i)
         if rec is None:
             raise ProjectError(f"no item definition {i}"
                                + (" (it is an unused series slot)" if project.series_for_id(i) else ""))
+        if new_kind is not None:
+            rec["kind"] = new_kind
         kind = schema.kind_of(rec)
         fields = derive.fields_of(kind)
         rules = derive.rules_of(kind)
@@ -80,9 +92,9 @@ def _table(project: Project, name: str) -> dict:
 def ref_fields(project: Project, table: str) -> Dict[str, List[str]]:
     """kind -> the kind's fields that hold keys of ``table``."""
     out: Dict[str, List[str]] = {}
-    for kind_name, kind in project.kinds.items():
+    for kind_name, kind in project.schema().kinds.items():  # with inherited fields
         for field, spec in derive.fields_of(kind).items():
-            if spec.get("type") == "ref" and spec.get("table") == table:
+            if isinstance(spec, dict) and spec.get("type") == "ref" and spec.get("table") == table:
                 out.setdefault(kind_name, []).append(field)
     return out
 
@@ -168,7 +180,7 @@ def items_for_rows(project: Project, record: dict, table: str, keys: Iterable[st
     the row's key and values."""
     rows = _table(project, table)["rows"]
     columns = _table(project, table)["columns"]
-    kind = project.kinds.get(record.get("kind")) if record.get("kind") else None
+    kind = project.schema().kinds.get(record.get("kind")) if record.get("kind") else None
     if record.get("kind") and kind is None:
         raise ProjectError(f"no kind named {record['kind']!r}")
     ref_fields = [f for f, spec in derive.fields_of(kind).items()
@@ -307,7 +319,7 @@ def rename_column(project: Project, table: str, old: str, new: str) -> int:
     item values. Returns the number of values changed. The table itself is
     changed by the caller."""
     heads = {table}
-    for kind in project.kinds.values():
+    for kind in project.schema().kinds.values():  # with inherited fields
         heads.update(f for f, spec in derive.fields_of(kind).items()
                      if isinstance(spec, dict) and spec.get("type") == "ref" and spec.get("table") == table)
     pattern = re.compile(r"\{(" + "|".join(map(re.escape, sorted(heads))) + r")(\[[^\]{}]*\])?\." + re.escape(old)
@@ -363,18 +375,22 @@ def kind_users(project: Project, name: str) -> List[int]:
     return [rec["itemdefid"] for rec in project.items if rec.get("kind") == name]
 
 
-def rename_kind_fields(kind: dict, records: List[dict], renames: Dict[str, str]) -> Dict[str, str]:
+def rename_kind_fields(kind: dict, records: List[dict], renames: Dict[str, str],
+                       others: Iterable[dict] = ()) -> Dict[str, str]:
     """Carry renamed fields of a kind over: the values stored on ``records``
     (items of the kind) move to the new names, and references to the old
     names in the kind's rules and defaults and in the items' stored values
-    follow, unless the kind now has another field of the old name. Changes
-    ``kind`` and ``records`` in place; returns the renames applied."""
+    follow, unless the kind now has another field of the old name. ``others``
+    are the definitions of kinds that extend it: their own entries for the
+    fields and their rules follow too. Changes everything in place; returns
+    the renames applied."""
     fields = derive.fields_of(kind)
     renames = {old: new for old, new in (renames or {}).items()
                if isinstance(old, str) and isinstance(new, str) and old != new and new in fields}
     if not renames:
         return {}
-    for rec in records:
+    others = [k for k in others if isinstance(k, dict)]
+    for rec in records + [k["fields"] for k in others if isinstance(k.get("fields"), dict)]:
         moved = {new: rec.pop(old) for old, new in renames.items() if old in rec}
         rec.update(moved)
     follow = [old for old in renames if old not in fields or old in renames.values()]
@@ -389,12 +405,13 @@ def rename_kind_fields(kind: dict, records: List[dict], renames: Dict[str, str])
                 return [fix(v) for v in value]
             return value
 
-        rules = kind.get("derive", {})
-        for rule in list(rules):
-            rules[rule] = fix(rules[rule])
-        for spec in fields.values():
-            if isinstance(spec, dict) and "default" in spec:
-                spec["default"] = fix(spec["default"])
+        for k in [kind, *others]:
+            rules = k.get("derive") if isinstance(k.get("derive"), dict) else {}
+            for rule in list(rules):
+                rules[rule] = fix(rules[rule])
+            for spec in derive.fields_of(k).values():
+                if isinstance(spec, dict) and "default" in spec:
+                    spec["default"] = fix(spec["default"])
         for rec in records:
             for key in list(rec):
                 if key not in derive.STRUCTURAL_FIELDS:
@@ -405,7 +422,8 @@ def rename_kind_fields(kind: dict, records: List[dict], renames: Dict[str, str])
 def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str] = None,
                  field_renames: Optional[Dict[str, str]] = None) -> None:
     """Save a kind (renaming it from ``old_name``). ``field_renames`` maps old
-    field names to new ones, so the kind's items keep their values."""
+    field names to new ones, so the items of the kind (and of the kinds that
+    extend it) keep their values. ``kind`` may hold ``extends``."""
     if not name.isidentifier():
         raise ProjectError("kind names may only contain letters, digits and _")
     if not isinstance(kind.get("fields", {}), dict) or not isinstance(kind.get("derive", {}), dict):
@@ -417,8 +435,15 @@ def replace_kind(project: Project, name: str, kind: dict, old_name: Optional[str
         for rec in project.items:
             if rec.get("kind") == old_name:
                 rec["kind"] = name
+        for other in project.kinds.values():
+            if derive.base_of(other) == old_name:
+                other["extends"] = name
     new = {"fields": copy.deepcopy(kind.get("fields", {})), "derive": copy.deepcopy(kind.get("derive", {}))}
-    rename_kind_fields(new, [rec for rec in project.items if rec.get("kind") == name], field_renames or {})
+    if kind.get("extends"):
+        new = {"extends": kind["extends"], **new}
+    below = derive.descendants(project.kinds, name)
+    rename_kind_fields(new, [rec for rec in project.items if rec.get("kind") in [name, *below]],
+                       field_renames or {}, [project.kinds[k] for k in below])
     project.kinds[name] = new
     problems = derive.schema_errors(project.schema())
     if problems:
@@ -431,6 +456,10 @@ def delete_kind(project: Project, name: str) -> None:
     users = kind_users(project, name)
     if users:
         raise ProjectError(f"kind {name!r} is used by {len(users)} item(s); detach them first")
+    below = [k for k, d in project.kinds.items() if derive.base_of(d) == name]
+    if below:
+        raise ProjectError(f"kind {name!r} is extended by {', '.join(below)}; delete those first or base them on "
+                           "another kind")
     del project.kinds[name]
 
 
@@ -459,8 +488,10 @@ def import_schema(project: Project, data: dict) -> List[str]:
         notes.append(f"table {name}: {len(target['columns'])} column(s), {len(target['rows'])} row(s)")
     for name, kind in (data.get("kinds") or {}).items():
         project.kinds[name] = copy.deepcopy(kind)
-        notes.append(f"kind {name}: {len(derive.fields_of(kind))} field(s), "
-                     f"{len(derive.rules_of(kind))} derived field(s)")
+        base = derive.base_of(kind)
+        notes.append(f"kind {name}" + (f" (extends {base})" if base else "") + f": {len(derive.fields_of(kind))} "
+                     f"{'own ' if base else ''}field(s), {len(derive.rules_of(kind))} {'own ' if base else ''}"
+                     "derived field(s)")
     problems = derive.schema_errors(project.schema())
     if problems:
         raise ProjectError("; ".join(problems))

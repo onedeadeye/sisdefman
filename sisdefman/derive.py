@@ -182,9 +182,13 @@ class TagsValue:
 
 
 class Schema:
+    """Tables and kinds. ``kinds`` are complete (a sub-type merged with the
+    kind it extends); ``definitions`` are the kinds as written."""
+
     def __init__(self, tables: Dict[str, dict], kinds: Dict[str, dict]):
         self.tables = tables
-        self.kinds = kinds
+        self.definitions = kinds
+        self.kinds = resolve_kinds(kinds)
 
     def kind_of(self, record: dict) -> Optional[dict]:
         name = record.get("kind")
@@ -192,6 +196,66 @@ class Schema:
 
     def rows(self, table: str) -> Dict[str, dict]:
         return (self.tables.get(table) or {}).get("rows") or {}
+
+
+def base_of(definition) -> Optional[str]:
+    """The kind a kind definition extends, if any."""
+    base = definition.get("extends") if isinstance(definition, dict) else None
+    return base if isinstance(base, str) and base else None
+
+
+def resolve_kinds(definitions: Dict[str, dict]) -> Dict[str, dict]:
+    """Every kind complete: a sub-type (``"extends": "skin"``) has the fields
+    and rules of the kind it extends, with its own on top. Its own rule for a
+    field replaces the inherited one; its own entry for a field adds to the
+    inherited field (``{"default": "..."}`` changes only the default)."""
+    out: Dict[str, dict] = {}
+
+    def build(name: str, seen: frozenset) -> Optional[dict]:
+        if name in out:
+            return out[name]
+        d = definitions.get(name)
+        if not isinstance(d, dict):
+            return None
+        own_fields = d.get("fields") if isinstance(d.get("fields"), dict) else {}
+        own_rules = d.get("derive") if isinstance(d.get("derive"), dict) else {}
+        base_name = base_of(d)
+        base = build(base_name, seen | {name}) if base_name and base_name not in seen else None
+        if base is None:
+            return out.setdefault(name, d)
+        base_fields = base.get("fields") if isinstance(base.get("fields"), dict) else {}
+        base_rules = base.get("derive") if isinstance(base.get("derive"), dict) else {}
+        fields = dict(base_fields)
+        for field, spec in own_fields.items():
+            inherited = fields.get(field)
+            fields[field] = {**inherited, **spec} if isinstance(inherited, dict) and isinstance(spec, dict) else spec
+        out[name] = {"extends": base_name, "fields": fields, "derive": {**base_rules, **own_rules}}
+        return out[name]
+
+    for name in definitions:
+        build(name, frozenset())
+    return out
+
+
+def descendants(definitions: Dict[str, dict], name: str) -> List[str]:
+    """The kinds that extend ``name``, directly or through others."""
+    out: List[str] = []
+    todo = [name]
+    while todo:
+        parent = todo.pop()
+        for child, d in definitions.items():
+            if base_of(d) == parent and child not in out and child != name:
+                out.append(child)
+                todo.append(child)
+    return out
+
+
+def family(definitions: Dict[str, dict], name: str) -> str:
+    """The kind at the top of ``name``'s chain of extends (itself if none)."""
+    seen = [name]
+    while base_of(definitions.get(seen[-1])) in definitions and base_of(definitions.get(seen[-1])) not in seen:
+        seen.append(base_of(definitions[seen[-1]]))
+    return seen[-1]
 
 
 def fields_of(kind: Optional[dict]) -> Dict[str, dict]:
@@ -530,12 +594,28 @@ def check_definitions(schema: Schema) -> List[str]:
                     out.append(f"table {name!r}: row {key!r} has values under {', '.join(extra)}, which "
                                f"{'is not a column' if len(extra) == 1 else 'are not columns'} of the table "
                                "(nothing uses them); remove them or add the column on the Lookup tables page")
-    for name, kind in schema.kinds.items():
-        if not isinstance(kind, dict) or not isinstance(kind.get("fields", {}), dict) \
-                or not isinstance(kind.get("derive", {}), dict):
+    for name, definition in schema.definitions.items():
+        if not isinstance(definition, dict) or not isinstance(definition.get("fields", {}), dict) \
+                or not isinstance(definition.get("derive", {}), dict):
             out.append(f"kind {name!r} needs \"fields\" and \"derive\" objects")
             continue
+        if "extends" in definition:
+            base, chain = base_of(definition), [name]
+            if base is None:
+                out.append(f"kind {name!r}: \"extends\" must name another kind")
+            elif base not in schema.definitions:
+                out.append(f"kind {name!r} extends {base!r}, which is not a kind")
+            while base is not None and base not in chain and base in schema.definitions:
+                chain.append(base)
+                base = base_of(schema.definitions[base])
+            if base in chain:
+                out.append(f"kind {name!r} extends itself ({' -> '.join(chain + [base])})")
+                continue
+        kind = schema.kinds[name]
+        own = definition.get("fields") or {}
         for field, spec in fields_of(kind).items():
+            if field not in own:
+                continue  # inherited: checked with the kind it comes from
             if field in RESERVED_NAMES:
                 out.append(f"kind {name!r}: {field!r} is a reserved name")
             if not isinstance(spec, dict):
@@ -546,7 +626,7 @@ def check_definitions(schema: Schema) -> List[str]:
                            f"(use {', '.join(FIELD_TYPES)})")
             if spec.get("type") == "ref" and spec.get("table") not in schema.tables:
                 out.append(f"kind {name!r}: field {field!r} refers to missing table {spec.get('table')!r}")
-        for field, rule in rules_of(kind).items():
+        for field, rule in rules_of(definition).items():
             for text in (rule if isinstance(rule, list) else [rule]):
                 if not isinstance(text, str):
                     continue

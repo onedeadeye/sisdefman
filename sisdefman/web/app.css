@@ -325,3 +325,6 @@ input[type=color] { width: 36px; height: 30px; padding: 2px; border: 1px solid v
 .nav.add:hover { color: var(--accent); }
 .row-picks { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; max-height: 220px; overflow: auto;
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12.5px; }
+.inherited { border: 1px dashed var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
+.inherited .row { padding: 2px 0; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

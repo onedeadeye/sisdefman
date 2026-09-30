@@ -137,7 +137,7 @@ def invert(rule, value, ctx: Context) -> Optional[Dict[str, str]]:
 def adopt(project: Project, kind_name: str, ids: List[int]) -> AdoptResult:
     """Convert the given items to ``kind_name`` in place (tables may gain
     rows and values). The caller saves the project."""
-    kind = project.kinds.get(kind_name)
+    kind = project.schema().kinds.get(kind_name)
     if kind is None:
         raise ProjectError(f"no kind named {kind_name!r} (known: {', '.join(project.kinds) or 'none'})")
     problems = derive.schema_errors(project.schema())
